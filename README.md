@@ -84,8 +84,13 @@ depends on it.
 
 ## Status
 
-**Design complete, implementation starting.** Every architectural decision is
-resolved and written down; the capture pipeline is being built now.
+**Working.** Record a session and you get a folder: `report.md`, `timeline.json`,
+`transcript.srt`, `video.webm`, and `frames/`. Every architectural decision is
+resolved and written down in [`docs/design/`](docs/design/).
+
+Not yet done: a Chrome Web Store listing (submission pending — the
+`chrome.debugger` permission gets a manual review), and three things that need a
+human rather than a script to verify — see [`AGENTS.md`](AGENTS.md).
 
 ## Why the design notes are in the repo
 

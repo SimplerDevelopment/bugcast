@@ -138,6 +138,8 @@ drive — they need a human, and this is already recorded in
 Shipped: #1 clock · #2 CDP capture · #3 redaction · #7 disk output ·
 #4 interactions · #9 artifact assembly · #5 offscreen capture · #6 transcription ·
 #8 frame index · #10 recording UX · #11 self-test · #12 MCP server ·
-#14 (closed as a false alarm) · #15 zip fallback.
+#14 (closed as a false alarm) · #15 zip fallback · #13 CI and release.
 
-Open: #13 CI and release.
+**All filed issues are closed.** What remains is not on the tracker: the three
+things needing a human (above), a Web Store submission, and whatever real use
+turns up.
