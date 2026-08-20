@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Bugcast — microphone</title>
+    <style>
+      body { font: 14px/1.5 system-ui, sans-serif; margin: 0; padding: 2.5rem; max-width: 34rem; }
+      h1 { font-size: 1.1rem; margin: 0 0 .75rem; }
+      p { color: #525252; margin: 0 0 1rem; }
+      #status { padding: .75rem; border-radius: .375rem; background: #f5f5f5; }
+      .ok { background: #dcfce7 !important; color: #166534; }
+      .no { background: #fee2e2 !important; color: #991b1b; }
+    </style>
+  </head>
+  <body>
+    <h1>Allow Bugcast to use your microphone</h1>
+    <p>
+      Your narration is transcribed <strong>on this machine</strong> and written to the session
+      folder as <code>transcript.srt</code>. Nothing is uploaded.
+    </p>
+    <p>
+      This page exists because the recorder runs in a background document that has no window, and
+      Chrome will only ask for microphone access from a visible page.
+    </p>
+    <div id="status">Requesting…</div>
+
+    <script>
+      const status = document.getElementById('status');
+      navigator.mediaDevices
+        .getUserMedia({ audio: true })
+        .then((stream) => {
+          // The grant is what matters, not the stream — the offscreen document
+          // opens its own once the permission exists.
+          for (const track of stream.getTracks()) track.stop();
+          status.textContent = 'Microphone enabled. You can close this tab and start recording.';
+          status.className = 'ok';
+        })
+        .catch((e) => {
+          status.textContent =
+            `Not enabled (${e.name}). Without it a session still records video, network and ` +
+            `console — there is simply no transcript.`;
+          status.className = 'no';
+        });
+    </script>
+  </body>
+</html>

@@ -46,6 +46,14 @@ interface Live {
   context: AudioContext;
   streams: MediaStream[];
   writable: FileSystemWritableFileStream | null;
+  /**
+   * Serialises chunk writes.
+   *
+   * They were fire-and-forget, so `close()` could — and did — run before any of
+   * them landed, producing a zero-byte video. Concurrent `write()` calls on one
+   * writable are also not safe to interleave.
+   */
+  writes: Promise<void>;
   /** Kept only when there is nowhere to stream to. */
   /** Held only when there is nowhere to stream to — see zipSession(). */
   buffered: Blob[];
@@ -116,13 +124,18 @@ async function start(msg: {
   const tabStream = await navigator.mediaDevices.getUserMedia(tabStreamConstraints(msg.streamId));
 
   let micStream: MediaStream | null = null;
+  let micError: string | null = null;
   if (msg.withMic) {
     try {
       micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch {
-      // Narration is optional by design: no mic simply means no .srt. It must
-      // not cost the recording.
+    } catch (e) {
+      // Narration is optional by design: no mic simply means no .srt, and it
+      // must not cost the recording. But the reason travels back, because an
+      // offscreen document has no UI and so can never *prompt* — if the grant
+      // does not already exist this fails with "Permission dismissed", and
+      // silently producing no transcript is indistinguishable from a bug.
       micStream = null;
+      micError = String((e as Error)?.name ?? e);
     }
   }
 
@@ -134,6 +147,7 @@ async function start(msg: {
     context,
     streams: [tabStream, micStream].filter(Boolean) as MediaStream[],
     writable,
+    writes: Promise.resolve(),
     buffered: [],
     pcm,
     bytes: 0,
@@ -144,8 +158,12 @@ async function start(msg: {
     state.bytes += e.data.size;
     // Streamed straight to disk. Buffering the session in memory is what the
     // File System Access API was chosen to avoid — ~170MB for fifteen minutes.
-    if (state.writable) void e.data.arrayBuffer().then((b) => state.writable!.write(b));
-    else state.buffered.push(e.data);
+    if (state.writable) {
+      const chunk = e.data;
+      state.writes = state.writes.then(async () => {
+        await state.writable!.write(await chunk.arrayBuffer());
+      });
+    } else state.buffered.push(e.data);
   };
   state.recorder.onerror = (e) => {
     void chrome.runtime.sendMessage({ type: OFFSCREEN_ERROR, error: String(e) });
@@ -163,7 +181,7 @@ async function start(msg: {
 
   live = state;
   tier = msg.tier ?? DEFAULT_TIER;
-  return { type: OFFSCREEN_STARTED, t0, mimeType, withMic: Boolean(micStream) };
+  return { type: OFFSCREEN_STARTED, t0, mimeType, withMic: Boolean(micStream), micError };
 }
 
 async function stop(): Promise<unknown> {
@@ -179,6 +197,8 @@ async function stop(): Promise<unknown> {
 
   for (const stream of state.streams) for (const track of stream.getTracks()) track.stop();
   await state.context.close();
+  // Every queued chunk must land before the file is closed.
+  await state.writes.catch((e) => console.error('[bugcast] chunk write failed', e));
   await state.writable?.close();
 
   // One flat buffer for the transcription engine (#6).
@@ -304,10 +324,19 @@ async function frames(msg: { sessionId: string; plan: PlannedFrame[] }): Promise
  * from, and tabCapture needs an activeTab grant this context does not have.
  */
 async function selfTest(
-  check: 'capture' | 'asr',
+  check: 'capture' | 'asr' | 'mic',
   tier: ModelTier,
 ): Promise<{ detail: string } | { error: string }> {
   try {
+    if (check === 'mic') {
+      // An offscreen document has no UI, so it cannot show a permission prompt.
+      // If the grant does not already exist, this is where it fails.
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const tracks = stream.getAudioTracks().length;
+      for (const t of stream.getTracks()) t.stop();
+      return { detail: `microphone available (${tracks} track)` };
+    }
+
     if (check === 'capture') {
       const canvas = document.createElement('canvas');
       canvas.width = 160;

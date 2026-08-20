@@ -47,6 +47,7 @@ export function App() {
     id: string; written: string | null; writeError: string | null; events: number; frames: number;
   } | null>(null);
   const [testing, setTesting] = useState(false);
+  const [mic, setMic] = useState<PermissionState | 'unknown'>('unknown');
 
   useEffect(() => {
     void (async () => {
@@ -60,7 +61,25 @@ export function App() {
       setTier((stored?.modelTier as ModelTier) ?? DEFAULT_TIER);
       setVideo(stored?.video !== false);
       setLast(stored?.lastSession ?? null);
+      // Chrome will only prompt from a visible page, and the recorder runs in a
+      // background document that has no window — so this is checked here and
+      // granted from a tab.
+      setMic(
+        await navigator.permissions
+          .query({ name: 'microphone' as PermissionName })
+          .then((p) => p.state)
+          .catch(() => 'unknown' as const),
+      );
       setLast(stored?.lastSession ?? null);
+      // Chrome will only prompt from a visible page, and the recorder runs in a
+      // background document that has no window — so this is checked here and
+      // granted from a tab.
+      setMic(
+        await navigator.permissions
+          .query({ name: 'microphone' as PermissionName })
+          .then((p) => p.state)
+          .catch(() => 'unknown' as const),
+      );
       setReady(true);
     })();
   }, []);
@@ -161,6 +180,7 @@ export function App() {
       else {
         setRecording(true);
         if (res?.captureError) setNote(`Recording without video: ${res.captureError}`);
+        else if (res?.micError) setNote('Recording without a microphone — there will be no transcript.');
       }
     } finally {
       setBusy(false);
@@ -255,6 +275,16 @@ export function App() {
 
       {note && <p className="text-xs text-neutral-600 break-all">{note}</p>}
       {error && <p className="text-xs text-red-600">{error}</p>}
+
+      {mic !== 'granted' && !recording && (
+        <button
+          onClick={() => void chrome.tabs.create({ url: chrome.runtime.getURL('mic.html') })}
+          className="w-full rounded border border-amber-300 bg-amber-50 px-3 py-2 text-left text-[11px] leading-snug text-amber-900 hover:bg-amber-100"
+        >
+          <span className="font-medium">Enable the microphone</span> — without it a session records
+          everything except your narration, so there is no transcript.
+        </button>
+      )}
 
       {last && !recording && (
         <div className="rounded bg-neutral-50 p-2 text-[11px] leading-snug">

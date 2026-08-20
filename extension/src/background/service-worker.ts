@@ -161,7 +161,16 @@ async function start(
     video: Boolean(capture),
   };
   setBadge(true);
-  return { ok: true, recording: true, captureError };
+  return {
+    ok: true,
+    recording: true,
+    captureError,
+    // Surfaced at record time, not discovered at the end. An offscreen document
+    // cannot prompt for the microphone, so without an existing grant there is
+    // simply never a transcript — and finding that out after narrating for ten
+    // minutes is the worst possible moment.
+    micError: capture ? capture.micError : null,
+  };
 }
 
 async function stop(): Promise<Response> {
@@ -522,7 +531,10 @@ async function storedTier(): Promise<string> {
   return (stored?.modelTier as string) ?? 'base.en';
 }
 
-async function startCapture(tabId: number, session: string): Promise<{ t0: number } | null> {
+async function startCapture(
+  tabId: number,
+  session: string,
+): Promise<{ t0: number; withMic: boolean; micError: string | null } | null> {
   await ensureOffscreen();
 
   // MV3 mints a stream id in the worker which the offscreen document then
@@ -549,7 +561,7 @@ async function startCapture(tabId: number, session: string): Promise<{ t0: numbe
     tier: await storedTier(),
   });
   if (!res || res.error) throw new Error(res?.error ?? 'Capture failed to start');
-  return { t0: res.t0 };
+  return { t0: res.t0, withMic: Boolean(res.withMic), micError: res.micError ?? null };
 }
 
 async function stopCapture(): Promise<unknown> {
@@ -623,6 +635,15 @@ async function selfTest(only?: string[]): Promise<unknown> {
       run: () => offscreenCheck('capture'),
     },
     {
+      id: 'mic',
+      label: 'Microphone',
+      // Checked from the offscreen document, not the popup, because that is
+      // where recording actually asks — and it is the context that cannot
+      // prompt. A grant that exists for the popup but not here would pass a
+      // check and still produce no transcript.
+      run: () => offscreenCheck('mic'),
+    },
+    {
       id: 'asr',
       label: 'Speech model',
       run: () => offscreenCheck('asr'),
@@ -636,7 +657,7 @@ async function selfTest(only?: string[]): Promise<unknown> {
   return results;
 }
 
-async function offscreenCheck(which: 'capture' | 'asr'): Promise<string> {
+async function offscreenCheck(which: 'capture' | 'mic' | 'asr'): Promise<string> {
   await ensureOffscreen();
   const res = await chrome.runtime.sendMessage({
     target: 'offscreen',

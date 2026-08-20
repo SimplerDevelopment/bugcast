@@ -26,7 +26,7 @@ export interface StartMessage {
 }
 
 export type Response =
-  | { ok: true; recording: boolean; captureError?: string | null }
+  | { ok: true; recording: boolean; captureError?: string | null; micError?: string | null }
   | {
       ok: true;
       recording: false;

@@ -11,7 +11,7 @@
  * Design: docs/design/issues/12-install-and-distribution.md
  */
 
-export type CheckId = 'cdp' | 'capture' | 'disk' | 'asr';
+export type CheckId = 'cdp' | 'capture' | 'disk' | 'mic' | 'asr';
 
 export interface CheckResult {
   id: CheckId;
