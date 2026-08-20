@@ -1,3 +1,7 @@
+export const OFFSCREEN_START = 'bugcast/offscreen-start';
+export const OFFSCREEN_STOP = 'bugcast/offscreen-stop';
+export const OFFSCREEN_STARTED = 'bugcast/offscreen-started';
+export const OFFSCREEN_ERROR = 'bugcast/offscreen-error';
 export const INTERACTION = 'bugcast/interaction';
 export const START_RECORDING = 'bugcast/start-recording';
 export const STOP_RECORDING = 'bugcast/stop-recording';
@@ -17,7 +21,7 @@ export interface StartMessage {
 }
 
 export type Response =
-  | { ok: true; recording: boolean }
+  | { ok: true; recording: boolean; captureError?: string | null }
   | {
       ok: true;
       recording: false;
@@ -27,5 +31,6 @@ export type Response =
       /** `folder/session-id`, or null if the write failed. */
       written: string | null;
       report: string;
+      capture: unknown;
     }
   | { error: string };

@@ -78,6 +78,14 @@ Every one of these was found the expensive way. Do not rediscover them.
   serializes to JSON and would destroy it.
 - **`tab.url` is not readable in the worker** without the broad `tabs`
   permission unless `activeTab` was granted by a gesture. The popup passes it.
+- **`use_dynamic_url: true` on a web-accessible resource changes its origin** to
+  `chrome-extension://<uuid>/`, which silently breaks `audioWorklet.addModule` —
+  worklet modules are same-origin restricted, and the failure is a bare "Unable
+  to load a worklet's module" while a plain `fetch` of the same URL returns 200.
+  An extension page needs no `web_accessible_resources` entry to load its own
+  files at all.
+- **`chrome.tabCapture.getMediaStreamId` needs an `activeTab` grant** that only a
+  real toolbar-icon click produces. Host permissions do not substitute.
 
 ## `bun run smoke` is not optional
 
@@ -97,7 +105,11 @@ drive — they need a human, and this is already recorded in
 - the File System Access directory grant, and whether it really re-prompts only
   once per browser restart;
 - whether `tabCapture`'s paint-driven cadence leaves the webm's timeline
-  tracking wall-clock.
+  tracking wall-clock;
+- `tabCapture` itself, which needs an activeTab grant no automation can produce.
+  The harness works around this by driving `buildPipeline` — the real function —
+  with a canvas+oscillator stream, which does verify the worklet, the tee,
+  MediaRecorder and the 48k→16k decimation.
 
 ## Where things are
 
@@ -113,8 +125,7 @@ drive — they need a human, and this is already recorded in
 ## Status
 
 Shipped: #1 clock · #2 CDP capture · #3 redaction · #7 disk output ·
-#4 interactions.
+#4 interactions · #9 artifact assembly · #5 offscreen capture.
 
-Open: #9 artifact assembly · #5 offscreen capture · #6 transcription ·
-#8 frame index · #10 recording UX · #11 self-test · #12 MCP server ·
+Open: #6 transcription · #8 frame index · #10 recording UX · #11 self-test · #12 MCP server ·
 #13 CI and release · #14 CORS row reads as 200 · #15 zip fallback.

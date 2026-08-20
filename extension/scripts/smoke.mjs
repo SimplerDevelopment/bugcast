@@ -119,6 +119,7 @@ const started = await ext.evaluate(
   ['bugcast/start-recording', tabId, `http://localhost:${PORT}/`, 'bugcast smoke'],
 );
 console.log('start ->', JSON.stringify(started));
+if (started?.captureError) console.log('capture error:', started.captureError);
 if (started?.error) {
   console.log('\nATTACH REFUSED (this is the refuse-to-start path working):', started.error);
   await ctx.close(); server.close(); process.exit(0);
@@ -168,6 +169,96 @@ const stopped = await ext.evaluate(
 // session must still come back rather than being lost to a write failure.
 console.log('\n=== report.md (first 40 lines) ===');
 console.log((stopped.report ?? '(none)').split('\n').slice(0, 40).join('\n'));
+
+// tabCapture needs an activeTab grant only a real toolbar click can produce,
+// so drive the real pipeline with a synthetic stream instead: a canvas for
+// video, an oscillator for audio. Proves the worklet loads, the tee wires up,
+// MediaRecorder produces bytes, and PCM comes out the tap.
+console.log('\n=== pipeline (synthetic stream) ===');
+const off = await ctx.newPage();
+await off.goto(`chrome-extension://${extId}/offscreen.html`);
+const pipeline = await off.evaluate(async () => {
+  const hooks = globalThis.__bugcastTestHooks;
+  if (!hooks) return { error: 'test hooks missing — offscreen.js did not load' };
+
+  // Diagnose the worklet URL before using it — "Unable to load a worklet's
+  // module" is the same message for 404, wrong MIME and a throwing module.
+  const workletUrl = chrome.runtime.getURL('pcm-worklet.js');
+  const probe = await fetch(workletUrl).then(
+    (r) => `${r.status} ${r.headers.get('content-type')}`,
+    (e) => `fetch failed: ${e.message}`,
+  );
+
+  const canvas = document.createElement('canvas');
+  canvas.width = 320;
+  canvas.height = 240;
+  const g = canvas.getContext('2d');
+  const paint = () => {
+    g.fillStyle = `hsl(${Date.now() % 360},70%,50%)`;
+    g.fillRect(0, 0, 320, 240);
+    requestAnimationFrame(paint);
+  };
+  paint();
+
+  const audioCtx = new AudioContext();
+  const osc = audioCtx.createOscillator();
+  const dest = audioCtx.createMediaStreamDestination();
+  osc.connect(dest);
+  osc.start();
+
+  const source = new MediaStream([
+    ...canvas.captureStream(15).getVideoTracks(),
+    ...dest.stream.getAudioTracks(),
+  ]);
+
+  const mime = hooks.pickMimeType((t) => MediaRecorder.isTypeSupported(t));
+  let built;
+  try {
+    built = await hooks.buildPipeline(source, null, mime);
+  } catch (e) {
+    return { error: `buildPipeline: ${e.name}: ${e.message}`, workletUrl, probe, mime };
+  }
+  const { recorder, context, pcm } = built;
+
+  let bytes = 0;
+  recorder.ondataavailable = (e) => (bytes += e.data.size);
+  const RECORD_MS = 1200;
+  recorder.start(200);
+  await new Promise((r) => setTimeout(r, RECORD_MS));
+  await new Promise((r) => {
+    recorder.onstop = r;
+    recorder.stop();
+  });
+  const sampleRate = context.sampleRate;
+  await context.close();
+  osc.stop();
+
+  return {
+    workletUrl,
+    probe,
+    mime,
+    bytes,
+    pcmChunks: pcm.length,
+    pcmSamples: pcm.reduce((n, c) => n + c.length, 0),
+    sampleRate,
+    // Should track wall-clock at exactly 16kHz if decimation is right.
+    pcmSeconds: +(pcm.reduce((n, c) => n + c.length, 0) / 16000).toFixed(3),
+    recordedSeconds: RECORD_MS / 1000,
+  };
+});
+console.log(JSON.stringify(pipeline, null, 2));
+if (pipeline.error || !pipeline.bytes || !pipeline.pcmSamples) {
+  console.error('FAIL: pipeline produced no video bytes or no PCM');
+  process.exitCode = 1;
+} else if (Math.abs(pipeline.pcmSeconds - pipeline.recordedSeconds) > 0.25) {
+  console.error(
+    `FAIL: PCM is ${pipeline.pcmSeconds}s for ${pipeline.recordedSeconds}s recorded — decimation ratio is wrong`,
+  );
+  process.exitCode = 1;
+}
+
+console.log('\n=== capture ===');
+console.log(JSON.stringify(stopped.capture ?? '(none)'));
 
 console.log('\n=== disk ===');
 console.log('sessionId:', stopped.sessionId);

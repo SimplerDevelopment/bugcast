@@ -9,6 +9,8 @@ import { renderReport } from '../lib/report';
 import type { RedactionSummary } from '../lib/redact';
 import {
   INTERACTION,
+  OFFSCREEN_START,
+  OFFSCREEN_STOP,
   RECORDING_STATE,
   START_RECORDING,
   STOP_RECORDING,
@@ -24,6 +26,8 @@ interface Recording {
   redactor: DefaultRedactor;
   /** The page title at record time — the only human-readable name available. */
   title: string;
+  id: string;
+  video: boolean;
   /**
    * Where the session began. Held separately because `ctx.pageUrl` is *current*
    * page context and navigation mutates it — reading it at stop time reported
@@ -74,12 +78,27 @@ async function start(tabId?: number, pageUrl?: string, title?: string): Promise<
 
   const events: TimelineEvent[] = [];
   const startedAt = new Date();
+  const id = sessionId(startedAt, pageUrl ?? tab.url ?? '');
+
+  // Capture starts before the clock does, because t0 belongs to
+  // MediaRecorder.start() and nothing else. If video is unavailable the session
+  // still runs — it just anchors on wall-clock instead.
+  // Video absence is degraded-but-honest rather than ambiguous: session.json
+  // declares `video: {enabled: false}`, so a reader cannot mistake it for
+  // "nothing was on screen". But it is still reported back so the popup can say
+  // so at record time, rather than the user finding out at the end.
+  let captureError: string | null = null;
+  const capture = await startCapture(tab.id, id).catch((e) => {
+    captureError = String(e?.message ?? e);
+    console.warn('[bugcast] capture unavailable', e);
+    return null;
+  });
   const redactor = new DefaultRedactor();
   const ctx: CaptureContext = {
-    // ponytail: t0 belongs to MediaRecorder.start() once capture lands (#5).
-    // Until then the CDP clock still needs an origin, and Date.now() here is
-    // the same instant to within the attach round-trip.
-    t0: Date.now(),
+    // Sampled inside MediaRecorder.start(), so every source in the artifact
+    // shares one origin with the video. Falls back to wall-clock only when
+    // there is no recorder to anchor to.
+    t0: capture?.t0 ?? Date.now(),
     // The popup passes this. Without the broad `tabs` permission a worker can
     // only read tab.url when activeTab has been granted by a user gesture, and
     // relying on that would make page context silently empty in other flows.
@@ -113,13 +132,15 @@ async function start(tabId?: number, pageUrl?: string, title?: string): Promise<
     redactor,
     title: title || tab.title || tab.url || 'Session',
     startUrl: ctx.pageUrl,
+    id,
+    video: Boolean(capture),
   };
-  return { ok: true, recording: true };
+  return { ok: true, recording: true, captureError };
 }
 
 async function stop(): Promise<Response> {
   if (!active) return { ok: true, recording: false };
-  const { cdp, events, startedAt, redactor, title, startUrl } = active;
+  const { cdp, events, startedAt, redactor, title, startUrl, id, video } = active;
   active = null;
   await cdp.detach();
   await unregisterInteractionCapture();
@@ -128,20 +149,20 @@ async function stop(): Promise<Response> {
   // arrive interleaved and slightly out of order.
   events.sort((a, b) => a.t - b.t);
 
-  const id = sessionId(startedAt, startUrl);
+  const capture = await stopCapture();
   const redaction = redactor.summary();
   let written: string | null = null;
   let report = '';
   try {
     report = renderSessionReport(id, title, startedAt, startUrl, events, redaction);
-    written = await writeSession(id, startedAt, startUrl, events, redaction, report);
+    written = await writeSession(id, startedAt, startUrl, events, redaction, report, video);
   } catch (e) {
     // A failed write must not swallow the session — the caller still gets the
     // events, so a folder problem costs a save rather than the recording.
     console.error('[bugcast] could not write session', e);
   }
 
-  return { ok: true, recording: false, events, redaction, sessionId: id, written, report };
+  return { ok: true, recording: false, events, redaction, sessionId: id, written, report, capture };
 }
 
 function durationOf(events: TimelineEvent[]): number {
@@ -181,6 +202,7 @@ async function writeSession(
   events: TimelineEvent[],
   redaction: unknown,
   report: string,
+  video: boolean,
 ): Promise<string> {
   const dir = await storedSessionDirectory();
   if (!dir) throw new Error('No sessions folder has been chosen.');
@@ -212,7 +234,9 @@ async function writeSession(
         capture: {
           network: { enabled: true, bodiesFor: ['status>=400'], bodyCapBytes: 65536 },
           console: { enabled: true },
-          video: { enabled: false },
+          video: video
+            ? { enabled: true, file: 'video.webm', frameRate: 15, codec: 'vp8/opus' }
+            : { enabled: false },
           transcript: { enabled: false },
           frames: { enabled: false },
         },
@@ -223,7 +247,11 @@ async function writeSession(
             'Redaction is best-effort heuristics, not a guarantee. Review before sharing.',
           ],
         },
-        files: { timeline: 'timeline.json', report: 'report.md' },
+        files: {
+          timeline: 'timeline.json',
+          report: 'report.md',
+          ...(video ? { video: 'video.webm' } : {}),
+        },
       },
       null,
       2,
@@ -307,4 +335,61 @@ function recordInteraction(msg: any): void {
     ...rest,
   } as TimelineEvent);
   if (rest?.value?.redacted) active.redactor.countWithheldValue();
+}
+
+const OFFSCREEN_URL = 'offscreen.html';
+
+/**
+ * The offscreen document is created lazily and torn down after each session.
+ *
+ * Chrome allows exactly one per extension, and a stale one from a crashed
+ * session would silently refuse the next `createDocument`.
+ */
+async function ensureOffscreen(): Promise<void> {
+  const existing = await chrome.runtime.getContexts({
+    contextTypes: ['OFFSCREEN_DOCUMENT' as chrome.runtime.ContextType],
+  });
+  if (existing.length) return;
+  await chrome.offscreen.createDocument({
+    url: OFFSCREEN_URL,
+    reasons: [chrome.offscreen.Reason.USER_MEDIA],
+    justification: 'Recording tab video and microphone audio for a QA session.',
+  });
+}
+
+async function startCapture(tabId: number, session: string): Promise<{ t0: number } | null> {
+  await ensureOffscreen();
+
+  // MV3 mints a stream id in the worker which the offscreen document then
+  // redeems — `chrome.tabCapture.capture()` cannot run in a worker at all.
+  // Promisified by hand: this one is still callback-typed, and the callback
+  // form is where chrome.runtime.lastError actually surfaces — "Cannot capture
+  // a tab without user gesture" arrives there rather than as a rejection.
+  const streamId = await new Promise<string>((resolve, reject) => {
+    chrome.tabCapture.getMediaStreamId({ targetTabId: tabId }, (id) => {
+      const err = chrome.runtime.lastError;
+      if (err || !id) reject(new Error(err?.message ?? 'No media stream id'));
+      else resolve(id);
+    });
+  });
+
+  const res = await chrome.runtime.sendMessage({
+    target: 'offscreen',
+    type: OFFSCREEN_START,
+    streamId,
+    sessionId: session,
+    // Optional, default on. No speech simply means no .srt; it must never cost
+    // the recording.
+    withMic: true,
+  });
+  if (!res || res.error) throw new Error(res?.error ?? 'Capture failed to start');
+  return { t0: res.t0 };
+}
+
+async function stopCapture(): Promise<unknown> {
+  const res = await chrome.runtime
+    .sendMessage({ target: 'offscreen', type: OFFSCREEN_STOP })
+    .catch(() => null);
+  await chrome.offscreen.closeDocument().catch(() => {});
+  return res;
 }
