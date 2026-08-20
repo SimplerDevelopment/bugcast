@@ -130,11 +130,22 @@ export function App() {
     setBusy(true);
     try {
       if (recording) {
+        // Re-granted here, before stopping. The grant does not outlive the
+        // context that obtained it, and this popup closed the moment you went
+        // off to do the QA — so by the time the worker writes, permission has
+        // lapsed and getDirectoryHandle fails with "not allowed ... in the
+        // current context". Stop is a click, so the activation needed to
+        // re-grant is already in hand; asking now is free.
+        const handle = await storedSessionDirectory();
+        if (handle && (await permissionState(handle)) !== 'granted') {
+          await requestPermission(handle).catch(() => false);
+        }
         const res = await chrome.runtime.sendMessage({ type: STOP_RECORDING });
         setRecording(false);
         if (res?.error) setError(res.error);
         // A failed write returns `written: null` AND a writeError. Showing only
         // the success case is how a lost session looks like nothing happening.
+        else if (res?.written && res?.writeError) setNote(`${res.writeError}\n→ ${res.written}`);
         else if (res?.writeError) setError(`Could not save: ${res.writeError}`);
         else if (res?.written) setNote(`Saved to ${res.written}`);
         setLast({

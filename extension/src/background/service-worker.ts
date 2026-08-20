@@ -215,7 +215,22 @@ async function stop(): Promise<Response> {
   try {
     report = renderSessionReport(id, title, startedAt, startUrl, events, redaction);
     const files = sessionFiles(id, startedAt, startUrl, events, redaction, report, video, segments, frames.written);
-    written = hasFolder ? await writeSession(id, files) : await zipSession(id, files);
+    if (hasFolder) {
+      try {
+        written = await writeSession(id, files);
+      } catch (e) {
+        // The folder write can fail for reasons the user cannot act on mid-flow
+        // — most often a lapsed File System Access grant, which does not
+        // outlive the context that obtained it. Losing a recorded session to
+        // that is the worst outcome available, so fall through to the zip
+        // rather than throwing away work that already exists.
+        console.warn('[bugcast] folder write failed, falling back to a zip', e);
+        writeError = `Saved as a zip instead — the folder write failed: ${(e as Error)?.message}`;
+        written = await zipSession(id, files);
+      }
+    } else {
+      written = await zipSession(id, files);
+    }
   } catch (e) {
     // A failed write must not swallow the session — the caller still gets the
     // events, so a folder problem costs a save rather than the recording.

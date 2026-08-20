@@ -380,11 +380,12 @@ async function selfTest(
       osc.connect(dest);
       osc.start();
 
-      const source = new MediaStream([
-        ...canvas.captureStream(15).getVideoTracks(),
-        ...dest.stream.getAudioTracks(),
-      ]);
-      const { recorder, context, pcm } = await buildPipeline(source, null, mimeType);
+      // The oscillator goes in as the MIC, not as tab audio: the Whisper tap
+      // takes mic only, so passing it as tab would leave the tap silent and the
+      // check would fail for the wrong reason. Video rides the tab branch.
+      const tabOnly = new MediaStream(canvas.captureStream(15).getVideoTracks());
+      const micOnly = new MediaStream(dest.stream.getAudioTracks());
+      const { recorder, context, pcm } = await buildPipeline(tabOnly, micOnly, mimeType);
 
       let bytes = 0;
       recorder.ondataavailable = (e) => (bytes += e.data.size);

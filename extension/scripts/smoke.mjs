@@ -242,15 +242,15 @@ const pipeline = await off.evaluate(async () => {
   osc.connect(dest);
   osc.start();
 
-  const source = new MediaStream([
-    ...canvas.captureStream(15).getVideoTracks(),
-    ...dest.stream.getAudioTracks(),
-  ]);
+  // Split, because the Whisper tap takes mic only: the oscillator has to arrive
+  // as the mic or the tap stays silent and this fails for the wrong reason.
+  const tabOnly = new MediaStream(canvas.captureStream(15).getVideoTracks());
+  const micOnly = new MediaStream(dest.stream.getAudioTracks());
 
   const mime = hooks.pickMimeType((t) => MediaRecorder.isTypeSupported(t));
   let built;
   try {
-    built = await hooks.buildPipeline(source, null, mime);
+    built = await hooks.buildPipeline(tabOnly, micOnly, mime);
   } catch (e) {
     return { error: `buildPipeline: ${e.name}: ${e.message}`, workletUrl, probe, mime };
   }
