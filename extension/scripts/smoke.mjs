@@ -221,7 +221,11 @@ const pipeline = await off.evaluate(async () => {
   const { recorder, context, pcm } = built;
 
   let bytes = 0;
-  recorder.ondataavailable = (e) => (bytes += e.data.size);
+  const parts = [];
+  recorder.ondataavailable = (e) => {
+    bytes += e.data.size;
+    parts.push(e.data);
+  };
   const RECORD_MS = 1200;
   recorder.start(200);
   await new Promise((r) => setTimeout(r, RECORD_MS));
@@ -232,6 +236,19 @@ const pipeline = await off.evaluate(async () => {
   const sampleRate = context.sampleRate;
   await context.close();
   osc.stop();
+
+  // Feed the recording straight back into the real extractor. Proves the
+  // linear requestVideoFrameCallback pass finds its moments and that JPEGs
+  // come out the other side.
+  const written = [];
+  const frames = await hooks.extractFrames(
+    new Blob(parts, { type: mime }),
+    [
+      { t: 200, path: 'frames/000000200-click.jpg', events: [0] },
+      { t: 700, path: 'frames/000000700-navigation.jpg', events: [1] },
+    ],
+    async (path, image) => written.push({ path, bytes: image.size, type: image.type }),
+  );
 
   return {
     workletUrl,
@@ -244,11 +261,16 @@ const pipeline = await off.evaluate(async () => {
     // Should track wall-clock at exactly 16kHz if decimation is right.
     pcmSeconds: +(pcm.reduce((n, c) => n + c.length, 0) / 16000).toFixed(3),
     recordedSeconds: RECORD_MS / 1000,
+    frames,
+    frameFiles: written,
   };
 });
 console.log(JSON.stringify(pipeline, null, 2));
 if (pipeline.error || !pipeline.bytes || !pipeline.pcmSamples) {
   console.error('FAIL: pipeline produced no video bytes or no PCM');
+  process.exitCode = 1;
+} else if (!pipeline.frames?.written || pipeline.frameFiles?.some((f) => !f.bytes)) {
+  console.error('FAIL: frame extraction produced no images');
   process.exitCode = 1;
 } else if (Math.abs(pipeline.pcmSeconds - pipeline.recordedSeconds) > 0.25) {
   console.error(

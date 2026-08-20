@@ -7,9 +7,11 @@ import { SCHEMA_VERSION } from '../lib/events';
 import { sessionId, storedSessionDirectory, writeFile } from '../lib/session-store';
 import { renderReport } from '../lib/report';
 import { toSpeechEvents, toSrt, type Segment } from '../lib/srt';
+import { planFrames } from '../lib/frames';
 import type { RedactionSummary } from '../lib/redact';
 import {
   INTERACTION,
+  OFFSCREEN_FRAMES,
   OFFSCREEN_START,
   OFFSCREEN_STOP,
   RECORDING_STATE,
@@ -161,19 +163,29 @@ async function stop(): Promise<Response> {
     events.sort((a, b) => a.t - b.t);
   }
 
+  // Frames are planned only once the timeline is final, because the plan is a
+  // function of the events — including the speech that only just arrived.
+  let frames = { written: 0, missed: 0 };
+  if (video) {
+    const plan = planFrames(events);
+    for (const frame of plan) for (const i of frame.events) events[i]!.frame = frame.path;
+    frames = ((await extractFrames(id, plan)) as typeof frames) ?? frames;
+  }
+  await closeOffscreen();
+
   const redaction = redactor.summary();
   let written: string | null = null;
   let report = '';
   try {
     report = renderSessionReport(id, title, startedAt, startUrl, events, redaction);
-    written = await writeSession(id, startedAt, startUrl, events, redaction, report, video, segments);
+    written = await writeSession(id, startedAt, startUrl, events, redaction, report, video, segments, frames.written);
   } catch (e) {
     // A failed write must not swallow the session — the caller still gets the
     // events, so a folder problem costs a save rather than the recording.
     console.error('[bugcast] could not write session', e);
   }
 
-  return { ok: true, recording: false, events, redaction, sessionId: id, written, report, capture };
+  return { ok: true, recording: false, events, redaction, sessionId: id, written, report, capture, frames };
 }
 
 function durationOf(events: TimelineEvent[]): number {
@@ -215,6 +227,7 @@ async function writeSession(
   report: string,
   video: boolean,
   segments: Segment[],
+  frameCount: number,
 ): Promise<string> {
   const dir = await storedSessionDirectory();
   if (!dir) throw new Error('No sessions folder has been chosen.');
@@ -252,7 +265,9 @@ async function writeSession(
           transcript: segments.length
             ? { enabled: true, file: 'transcript.srt', segments: segments.length }
             : { enabled: false },
-          frames: { enabled: false },
+          frames: frameCount
+            ? { enabled: true, dir: 'frames/', count: frameCount, longEdge: 1280 }
+            : { enabled: false },
         },
         redaction: {
           typedValues: 'off',
@@ -266,6 +281,7 @@ async function writeSession(
           report: 'report.md',
           ...(video ? { video: 'video.webm' } : {}),
           ...(segments.length ? { transcript: 'transcript.srt' } : {}),
+          ...(frameCount ? { frames: 'frames/' } : {}),
         },
       },
       null,
@@ -403,9 +419,21 @@ async function startCapture(tabId: number, session: string): Promise<{ t0: numbe
 }
 
 async function stopCapture(): Promise<unknown> {
-  const res = await chrome.runtime
+  // Deliberately does NOT close the document — frame extraction still needs a
+  // <video>, a canvas and requestVideoFrameCallback, none of which exist in a
+  // service worker. closeOffscreen() runs once everything is out.
+  return chrome.runtime
     .sendMessage({ target: 'offscreen', type: OFFSCREEN_STOP })
     .catch(() => null);
+}
+
+async function extractFrames(session: string, plan: unknown[]): Promise<unknown> {
+  if (!plan.length) return { written: 0, missed: 0 };
+  return chrome.runtime
+    .sendMessage({ target: 'offscreen', type: OFFSCREEN_FRAMES, sessionId: session, plan })
+    .catch(() => ({ written: 0, missed: plan.length }));
+}
+
+async function closeOffscreen(): Promise<void> {
   await chrome.offscreen.closeDocument().catch(() => {});
-  return res;
 }

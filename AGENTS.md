@@ -129,7 +129,8 @@ drive — they need a human, and this is already recorded in
 ## Status
 
 Shipped: #1 clock · #2 CDP capture · #3 redaction · #7 disk output ·
-#4 interactions · #9 artifact assembly · #5 offscreen capture · #6 transcription.
+#4 interactions · #9 artifact assembly · #5 offscreen capture · #6 transcription ·
+#8 frame index.
 
-Open: #8 frame index · #10 recording UX · #11 self-test · #12 MCP server ·
+Open: #10 recording UX · #11 self-test · #12 MCP server ·
 #13 CI and release · #14 CORS row reads as 200 · #15 zip fallback.

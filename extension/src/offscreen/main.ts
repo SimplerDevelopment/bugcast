@@ -22,6 +22,8 @@
 
 import { idbGet } from '../lib/idb';
 import { cleanSegments } from '../lib/srt';
+import type { PlannedFrame } from '../lib/frames';
+import { extractFrames } from './frames';
 import { DEFAULT_TIER, transformersEngine, type ModelTier } from './transcribe';
 import {
   CHUNK_MS,
@@ -31,6 +33,7 @@ import {
 } from '../lib/recorder';
 import {
   OFFSCREEN_ERROR,
+  OFFSCREEN_FRAMES,
   OFFSCREEN_START,
   OFFSCREEN_STARTED,
   OFFSCREEN_STOP,
@@ -60,8 +63,14 @@ export let lastSamples: Float32Array = new Float32Array(0);
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.target !== 'offscreen') return;
-  if (msg.type !== OFFSCREEN_START && msg.type !== OFFSCREEN_STOP) return;
-  const handler = msg.type === OFFSCREEN_START ? start(msg) : stop();
+  const handlers: Record<string, () => Promise<unknown>> = {
+    [OFFSCREEN_START]: () => start(msg),
+    [OFFSCREEN_STOP]: () => stop(),
+    [OFFSCREEN_FRAMES]: () => frames(msg),
+  };
+  const run = handlers[msg.type];
+  if (!run) return;
+  const handler = run();
   handler.then(sendResponse, (e) => sendResponse({ error: String(e?.message ?? e) }));
   return true;
 });
@@ -231,6 +240,34 @@ export async function buildPipeline(
   return { recorder: new MediaRecorder(composed, recorderOptions(mimeType)), context, pcm };
 }
 
+/**
+ * Extract the frame index, after the timeline is final.
+ *
+ * Runs here rather than in the worker because it needs a <video>, a canvas and
+ * `requestVideoFrameCallback`, none of which exist in a service worker.
+ */
+async function frames(msg: { sessionId: string; plan: PlannedFrame[] }): Promise<unknown> {
+  if (!msg.plan?.length) return { written: 0, missed: 0 };
+
+  const dir = await idbGet<FileSystemDirectoryHandle>('sessionDirectory');
+  if (!dir) return { written: 0, missed: msg.plan.length, error: 'No sessions folder' };
+
+  const folder = await dir.getDirectoryHandle(msg.sessionId, { create: true });
+  const handle = await folder.getFileHandle('video.webm').catch(() => null);
+  if (!handle) return { written: 0, missed: msg.plan.length, error: 'No recording to extract from' };
+
+  const video = await handle.getFile();
+  return extractFrames(video, msg.plan, async (relPath, image) => {
+    // `frames/000012340-click.jpg` — one nested segment to create.
+    const [dirName, fileName] = relPath.split('/');
+    const target = await folder.getDirectoryHandle(dirName!, { create: true });
+    const file = await target.getFileHandle(fileName!, { create: true });
+    const writable = await file.createWritable();
+    await writable.write(await image.arrayBuffer());
+    await writable.close();
+  });
+}
+
 async function storedTier(): Promise<ModelTier> {
   const stored = await chrome.storage.local.get('modelTier');
   return (stored?.modelTier as ModelTier) ?? DEFAULT_TIER;
@@ -256,4 +293,5 @@ async function openSessionStream(session: string): Promise<FileSystemWritableFil
 (globalThis as unknown as Record<string, unknown>).__bugcastTestHooks = {
   buildPipeline,
   pickMimeType,
+  extractFrames,
 };

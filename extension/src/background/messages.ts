@@ -1,3 +1,4 @@
+export const OFFSCREEN_FRAMES = 'bugcast/offscreen-frames';
 export const OFFSCREEN_START = 'bugcast/offscreen-start';
 export const OFFSCREEN_STOP = 'bugcast/offscreen-stop';
 export const OFFSCREEN_STARTED = 'bugcast/offscreen-started';
@@ -32,5 +33,6 @@ export type Response =
       written: string | null;
       report: string;
       capture: unknown;
+      frames: { written: number; missed: number };
     }
   | { error: string };
