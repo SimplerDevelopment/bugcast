@@ -1,3 +1,4 @@
+export const LIVE_SPEECH = 'bugcast/live-speech';
 export const OFFSCREEN_FLUSH_VIDEO = 'bugcast/offscreen-flush-video';
 export const OFFSCREEN_ZIP = 'bugcast/offscreen-zip';
 export const RUN_SELF_TEST = 'bugcast/run-self-test';

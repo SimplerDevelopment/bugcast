@@ -61,6 +61,15 @@ export interface NavigationEvent extends BaseEvent {
 export interface SpeechEvent extends BaseEvent {
   type: 'speech';
   text: string;
+  /**
+   * Emitted from a rolling window during the session, and superseded by the
+   * authoritative full-audio pass at stop.
+   *
+   * Flagged rather than silently replaced so a consumer reading live can tell
+   * approximate text from final text — discovering that a line changed under
+   * you is worse than being told it might.
+   */
+  provisional?: true;
 }
 
 export interface ClickEvent extends BaseEvent {

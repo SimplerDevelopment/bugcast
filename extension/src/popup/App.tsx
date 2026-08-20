@@ -223,7 +223,8 @@ export function App() {
       <Shell>
         <p className="text-xs text-neutral-600">
           Sessions are written to a folder you choose. Nothing is uploaded — transcription runs on
-          this machine.
+          this machine. Choosing <code>~/bugcast-sessions</code> means the MCP server finds them
+          with no configuration.
         </p>
         <button
           onClick={choose}

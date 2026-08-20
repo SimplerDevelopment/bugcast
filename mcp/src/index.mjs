@@ -19,9 +19,11 @@ import path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import os from 'node:os';
 import {
   assertReadable,
   filterEvents,
+  tailEvents,
   listSessionIds,
   readFrame,
   readReport,
@@ -30,21 +32,21 @@ import {
   summarise,
 } from './sessions.mjs';
 
+/**
+ * Where sessions live.
+ *
+ * Defaulted rather than required, so this server can be registered once at user
+ * scope and work in every project without per-project configuration. The
+ * extension cannot tell us the path — the File System Access API never exposes
+ * one — so the default is a convention both ends can agree on by name.
+ */
+export const DEFAULT_DIR = path.join(os.homedir(), 'bugcast-sessions');
+
 function parseDir(argv) {
   const i = argv.indexOf('--dir');
   const value = i >= 0 ? argv[i + 1] : process.env.BUGCAST_DIR;
-  if (!value) {
-    console.error(
-      'bugcast: --dir is required.\n\n' +
-        '  npx -y bugcast --dir /path/to/your/sessions\n\n' +
-        'Use the same folder you chose in the extension. It cannot be discovered\n' +
-        'automatically: the File System Access API never exposes an absolute path,\n' +
-        'so the extension does not know it either.',
-    );
-    process.exit(1);
-  }
   // Resolved once, here, and never joined with anything user-supplied again.
-  return path.resolve(value);
+  return path.resolve(value || DEFAULT_DIR);
 }
 
 const ROOT = parseDir(process.argv.slice(2));
@@ -105,6 +107,26 @@ server.registerTool(
   async ({ sessionId, ...query }) => {
     const timeline = await readTimeline(ROOT, await resolve(sessionId));
     return text(filterEvents(timeline.events ?? [], query));
+  },
+);
+
+server.registerTool(
+  'session_tail',
+  {
+    title: 'Read a session as it is being recorded',
+    description:
+      'Events since a cursor, from the append-only stream. Works while recording is still in progress — poll with the returned cursor to follow along. Speech events flagged provisional:true are from a rolling window and are replaced by the final transcript when the session stops.',
+    inputSchema: {
+      sessionId: z.string().describe('Or "latest" for the most recent session.'),
+      cursor: z.number().int().min(0).default(0).optional(),
+      limit: z.number().int().min(1).max(500).default(200).optional(),
+    },
+  },
+  async ({ sessionId, cursor = 0, limit = 200 }) => {
+    const ids = await listSessionIds(ROOT);
+    const id = sessionId === 'latest' ? ids[0] : resolveSessionId(sessionId, ids);
+    if (!id) return text({ error: 'No sessions recorded yet.' });
+    return text(await tailEvents(ROOT, id, cursor, limit));
   },
 );
 

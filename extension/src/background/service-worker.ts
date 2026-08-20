@@ -12,6 +12,7 @@ import { runChecks, type Check } from '../lib/self-test';
 import type { RedactionSummary } from '../lib/redact';
 import {
   DROP_MARKER,
+  LIVE_SPEECH,
   OFFSCREEN_SELF_TEST,
   RUN_SELF_TEST,
   INTERACTION,
@@ -37,6 +38,12 @@ interface Recording {
   title: string;
   id: string;
   video: boolean;
+  /** Open for the whole session; events.ndjson is appended to as it goes. */
+  stream: FileSystemWritableFileStream | null;
+  /** Batched rather than written per event — see below. */
+  pending: string[];
+  writes: Promise<void>;
+  flushTimer: number;
   /**
    * Where the session began. Held separately because `ctx.pageUrl` is *current*
    * page context and navigation mutates it — reading it at stop time reported
@@ -71,6 +78,9 @@ async function handle(msg: any): Promise<Response> {
       return { ok: true, recording: active !== null };
     case RUN_SELF_TEST:
       return { ok: true, recording: active !== null, checks: await selfTest(msg.only) } as never;
+    case LIVE_SPEECH:
+      recordLiveSpeech(msg.segments);
+      return { ok: true, recording: active !== null };
     case DROP_MARKER:
       return { ok: true, recording: dropMarker(msg.note || 'Marked') };
     default:
@@ -102,6 +112,11 @@ async function start(
 
   const events: TimelineEvent[] = [];
   const startedAt = new Date();
+  /** Appended to `events` and queued for the live stream in one place. */
+  const record = (event: TimelineEvent): void => {
+    events.push(event);
+    if (active) active.pending.push(JSON.stringify(event));
+  };
   const id = sessionId(startedAt, pageUrl ?? tab.url ?? '');
 
   // Capture starts before the clock does, because t0 belongs to
@@ -129,7 +144,7 @@ async function start(
     // only read tab.url when activeTab has been granted by a user gesture, and
     // relying on that would make page context silently empty in other flows.
     pageUrl: pageUrl ?? tab.url ?? '',
-    emit: (event) => events.push(event),
+    emit: record,
     // Runs in memory, before anything is serialized — the raw value never
     // reaches disk. See lib/redact.ts.
     redactor,
@@ -142,7 +157,7 @@ async function start(
   // Recording almost always starts on an already-loaded page, so
   // Page.frameNavigated never fires for it and the timeline would never say
   // where the session began. Found by the smoke test.
-  events.push({ type: 'navigation', t: 0, pageUrl: ctx.pageUrl, trigger: 'load', from: null });
+  record({ type: 'navigation', t: 0, pageUrl: ctx.pageUrl, trigger: 'load', from: null });
 
   cdp.detachedCallback = () => {
     // The user dismissed the infobar mid-session. The session is over either
@@ -150,10 +165,24 @@ async function start(
     active = null;
   };
 
+  const stream = await openEventStream(id).catch((e) => {
+    console.warn('[bugcast] live event stream unavailable', e);
+    return null;
+  });
+
   active = {
     cdp,
     ctx,
     events,
+    stream,
+    pending: [],
+    writes: Promise.resolve(),
+    // Batched every couple of seconds rather than written per event. Not a
+    // micro-optimisation: the File System Access grant lapsing has been the
+    // largest real source of failure here, and per-event writes would multiply
+    // operations against exactly that permission by orders of magnitude. Two
+    // seconds is nothing against the cadence of someone narrating.
+    flushTimer: setInterval(() => flushEvents(), FLUSH_MS) as unknown as number,
     startedAt,
     redactor,
     title: title || tab.title || tab.url || 'Session',
@@ -177,8 +206,13 @@ async function start(
 async function stop(): Promise<Response> {
   if (!active) return { ok: true, recording: false };
   const { cdp, events, startedAt, redactor, title, startUrl, id, video } = active;
+  clearInterval(active.flushTimer);
+  const stream = active.stream;
+  const finalFlush = flushEvents();
   active = null;
   setBadge(false);
+  await finalFlush;
+  await stream?.close().catch(() => {});
   await cdp.detach();
   await unregisterInteractionCapture();
 
@@ -207,6 +241,13 @@ async function stop(): Promise<Response> {
   // click it describes, because people narrate intent before acting.
   const segments = capture?.segments ?? [];
   if (segments.length) {
+    // The authoritative pass supersedes every provisional line. events.ndjson
+    // keeps both — it is an append-only log of what was known when — while
+    // timeline.json carries only the final text.
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i]!;
+      if (e.type === 'speech' && e.provisional) events.splice(i, 1);
+    }
     events.push(...toSpeechEvents(segments, startUrl));
     events.sort((a, b) => a.t - b.t);
   }
@@ -473,6 +514,22 @@ async function injectInteractionCapture(tabId: number): Promise<void> {
 
 async function unregisterInteractionCapture(): Promise<void> {
   await chrome.scripting.unregisterContentScripts({ ids: [CONTENT_SCRIPT_ID] }).catch(() => {});
+}
+
+/**
+ * Provisional narration from a rolling window.
+ *
+ * Flagged rather than quietly replaced later, because a consumer reading the
+ * stream should be able to tell approximate text from final text. The
+ * authoritative pass at stop drops these and re-derives from the whole audio;
+ * it never reads them, so a bad window cannot reach the artifact on disk.
+ */
+function recordLiveSpeech(segments: Segment[] | undefined): void {
+  if (!active || !segments?.length) return;
+  for (const event of toSpeechEvents(segments, active.ctx.pageUrl)) {
+    active.events.push({ ...event, provisional: true });
+    active.pending.push(JSON.stringify({ ...event, provisional: true }));
+  }
 }
 
 /**
@@ -760,4 +817,36 @@ async function offscreenCheck(which: 'capture' | 'mic' | 'asr'): Promise<string>
   );
   if (!res || res.error) throw new Error(res?.error ?? 'No response from the recorder');
   return res.detail as string;
+}
+
+/** How often queued events reach disk. */
+const FLUSH_MS = 2_000;
+
+async function openEventStream(session: string): Promise<FileSystemWritableFileStream | null> {
+  const dir = await storedSessionDirectory();
+  if (!dir) return null;
+  const folder = await dir.getDirectoryHandle(session, { create: true });
+  const file = await folder.getFileHandle('events.ndjson', { create: true });
+  // One writable held open for the session. Its position advances with each
+  // write, so successive batches append rather than overwrite.
+  return file.createWritable();
+}
+
+/**
+ * Append whatever has accumulated.
+ *
+ * Serialised through a promise chain for the same reason the video chunks are:
+ * concurrent writes on one writable interleave, and a close that races them
+ * truncates the file.
+ */
+function flushEvents(): Promise<void> {
+  const session = active;
+  if (!session?.stream || !session.pending.length) return session?.writes ?? Promise.resolve();
+
+  const batch = session.pending.join('\n') + '\n';
+  session.pending = [];
+  session.writes = session.writes.then(() =>
+    session.stream!.write(batch).catch((e) => console.warn('[bugcast] event flush failed', e)),
+  );
+  return session.writes;
 }

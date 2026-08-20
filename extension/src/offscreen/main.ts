@@ -32,6 +32,7 @@ import {
   tabStreamConstraints,
 } from '../lib/recorder';
 import {
+  LIVE_SPEECH,
   OFFSCREEN_ERROR,
   OFFSCREEN_FLUSH_VIDEO,
   OFFSCREEN_FRAMES,
@@ -60,6 +61,8 @@ interface Live {
   buffered: Blob[];
   pcm: Float32Array[];
   bytes: number;
+  /** Drives rolling live transcription. */
+  liveTimer: number;
 }
 
 let live: Live | null = null;
@@ -84,6 +87,63 @@ let lastBuffered: Blob[] = [];
 
 /** Set at start, because it cannot be read from here. */
 let tier: ModelTier = DEFAULT_TIER;
+
+/**
+ * Rolling live transcription.
+ *
+ * Ten seconds is a compromise: shorter gives a consumer fresher narration and
+ * worse text, because Whisper leans on context and a clipped window has less of
+ * it. Everything emitted here is provisional and superseded at stop, so
+ * boundary damage is acceptable by construction — but it is real, and a word
+ * split across two windows is mangled in both.
+ */
+const LIVE_WINDOW_SAMPLES = 16_000 * 10;
+
+/** Samples already sent to the live pass. */
+let liveOffset = 0;
+let liveBusy = false;
+
+function flatten(chunks: Float32Array[], from: number, to: number): Float32Array {
+  const out = new Float32Array(to - from);
+  let seen = 0;
+  let written = 0;
+  for (const chunk of chunks) {
+    const start = Math.max(from, seen);
+    const end = Math.min(to, seen + chunk.length);
+    if (end > start) {
+      out.set(chunk.subarray(start - seen, end - seen), written);
+      written += end - start;
+    }
+    seen += chunk.length;
+    if (seen >= to) break;
+  }
+  return out;
+}
+
+async function transcribeLiveWindow(pcm: Float32Array[]): Promise<void> {
+  if (liveBusy) return; // a window still running; the next tick will catch up
+  const total = pcm.reduce((n, c) => n + c.length, 0);
+  if (total - liveOffset < LIVE_WINDOW_SAMPLES) return;
+
+  liveBusy = true;
+  const from = liveOffset;
+  const to = from + LIVE_WINDOW_SAMPLES;
+  liveOffset = to;
+  try {
+    const window = flatten(pcm, from, to);
+    const segments = cleanSegments(
+      await transformersEngine(tier).transcribe(window, (from / 16_000) * 1000),
+    );
+    if (segments.length) {
+      void chrome.runtime.sendMessage({ type: LIVE_SPEECH, segments }).catch(() => {});
+    }
+  } catch {
+    // A failed window costs that window and nothing else. The authoritative
+    // pass at stop reads the whole audio regardless.
+  } finally {
+    liveBusy = false;
+  }
+}
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.target !== 'offscreen') return;
@@ -170,6 +230,7 @@ async function start(msg: {
     buffered: [],
     pcm,
     bytes: 0,
+    liveTimer: 0,
   };
 
   state.recorder.ondataavailable = (e) => {
@@ -191,6 +252,13 @@ async function start(msg: {
   // t0 is sampled synchronously with start() and nowhere else. Measured skew
   // from the first frame is one frame interval, but tabCapture is paint-driven,
   // so on a static page frame 0 can be seconds stale — never anchor on it.
+  liveOffset = 0;
+  liveBusy = false;
+  state.liveTimer = setInterval(
+    () => void transcribeLiveWindow(state.pcm),
+    2_000,
+  ) as unknown as number;
+
   state.recorder.start(CHUNK_MS);
   const t0 = Date.now();
   // The tap has been live since it was connected, a few milliseconds before
@@ -215,6 +283,7 @@ async function stop(): Promise<unknown> {
   live = null;
   if (!state) return { ok: true };
 
+  clearInterval(state.liveTimer);
   await new Promise<void>((resolve) => {
     state.recorder.onstop = () => resolve();
     if (state.recorder.state === 'inactive') resolve();

@@ -251,6 +251,21 @@ the destination is a working published repo, not a spec.
   earns its place and incidentally settles the WebGPU-vs-WASM question on real
   hardware.
 
+- [Streaming the session so an agent can read it as it happens](issues/16-streaming-for-live-agents.md) —
+  **One append-only `events.ndjson` carrying everything, including speech.**
+  Reverses 07's "streaming buys nothing": true for *producing* an artifact,
+  false for *consuming one live*, where a minute of latency is fatal. The
+  obvious version — stream events, transcript at stop — is wrong for a reason 09
+  already established: events are the *what*, narration is the *why*, and the
+  narration lands **before** the click it describes. Speech streams or there is
+  no point. Live segments are flagged `provisional` and superseded by the
+  authoritative stop pass, which never consumes them, so artifact quality is
+  unchanged. Writes batch every ~2s because the FSA grant lapsing has been the
+  largest real source of failure and streaming would turn one burst into
+  hundreds of operations against it. The channel is the file; MCP adds a cursor
+  tool. Rejected a local WebSocket — lowest latency, but a listening socket
+  inside a tool whose identity is "no server" is a line not worth crossing.
+
 ## Not yet specified
 
 - **Which transcription backend is actually faster here.** One primary benchmark

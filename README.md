@@ -13,7 +13,8 @@ Then hand the folder to a coding agent.
 2026-08-20T14-32-09_app-simplerdev-com/
   report.md          # deterministic rendering of the timeline — start here
   session.json       # manifest: capture config, environment, redaction summary
-  timeline.json      # flat, time-ordered, discriminated union — the source of truth
+  timeline.json      # flat, time-ordered, discriminated union
+  events.ndjson      # the same events, appended live as they happen
   transcript.srt     # your narration, timestamped
   video.webm
   frames/            # a JPEG at each event boundary
@@ -64,23 +65,26 @@ why the obvious `whisper.cpp` approach doesn't work.
 Point it at `report.md` and you're done — that's the whole handoff, and it needs
 nothing installed.
 
-For longer sessions, where the raw timeline runs to tens of thousands of tokens,
-there's an optional read-only MCP server so your agent can ask "what failed"
-instead of reading everything:
+For longer sessions — where the raw timeline runs to tens of thousands of tokens
+— there's an optional read-only MCP server, registered once for every project
+you ever open:
 
-```jsonc
-{
-  "mcpServers": {
-    "bugcast": {
-      "command": "npx",
-      "args": ["-y", "bugcast", "--dir", "/path/to/your/sessions"]
-    }
-  }
-}
+```bash
+claude mcp add --scope user bugcast -- npx -y bugcast
 ```
 
-See [`mcp/`](mcp/) for the tools. It is strictly optional — recording never
-depends on it.
+Point the extension at `~/bugcast-sessions` and no path configuration is needed
+at either end.
+
+It can also read a session **while you are still recording it**, so an agent
+follows along live rather than waiting for you to finish:
+
+```
+session_tail({ sessionId: "latest" })   ->   { events, cursor, live: true }
+```
+
+See [`mcp/`](mcp/) for the tools. Strictly optional — recording never depends on
+it, and `report.md` alone is a complete handoff.
 
 ## Status
 

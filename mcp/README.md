@@ -1,39 +1,53 @@
 # bugcast (MCP server)
 
-Query [bugcast](https://github.com/SimplerDevelopment/bugcast) QA session
-folders from a coding agent.
+Read [bugcast](https://github.com/SimplerDevelopment/bugcast) QA sessions from a
+coding agent — including **while they are still being recorded**.
 
-**Optional.** Recording does not need this, and neither does reading a session —
-you can always just point your agent at `report.md`. This exists because a
-fifteen-minute session's raw `timeline.json` runs to roughly 50k tokens, and
-pasting all of it to ask "what failed" is exactly the waste the tool is meant to
-remove.
+## Setup, once, for every project
 
-## Setup
-
-```jsonc
-{
-  "mcpServers": {
-    "bugcast": {
-      "command": "npx",
-      "args": ["-y", "bugcast", "--dir", "/path/to/your/sessions"]
-    }
-  }
-}
+```bash
+claude mcp add --scope user bugcast -- npx -y bugcast
 ```
 
-Use the same folder you chose in the extension. It cannot be discovered
+`--scope user` is the point: registered once, available in every project you
+open, with nothing to add per-repo.
+
+No `--dir` needed if you point the extension at **`~/bugcast-sessions`**, which
+is what this server reads by default. The path cannot be discovered
 automatically — the File System Access API never exposes an absolute path, so
-the extension does not know it either.
+the extension does not know it either — so the two ends agree by convention
+instead. Somewhere else is fine: `npx -y bugcast --dir /path/to/sessions`, or set
+`BUGCAST_DIR`.
+
+The directory is created if it does not exist. An empty one is a correct answer
+to "what sessions exist", not a reason to fail on the first run.
 
 ## Tools
 
 | Tool | |
 |---|---|
-| `sessions_list` | Recent sessions, newest first |
-| `session_report` | The human-readable rendering. Start here. |
-| `session_query` | A filtered slice of the timeline. `failedOnly: true` answers "what went wrong". |
-| `session_frame` | The JPEG nearest a moment, for looking at what the page showed |
+| `sessions_list` | Recent sessions, newest first. A session still recording is marked `live`. |
+| `session_tail` | Events since a cursor, **works during recording**. Poll with the returned cursor to follow along. |
+| `session_report` | The human-readable rendering of a finished session. Start here for a post-mortem. |
+| `session_query` | A filtered slice of a finished timeline. `failedOnly: true` answers "what went wrong". |
+| `session_frame` | The JPEG nearest a moment, for seeing what the page showed. |
+
+## Following a live session
+
+```
+session_tail({ sessionId: "latest" })          -> { events, cursor, live: true }
+session_tail({ sessionId: "latest", cursor })  -> only what is new
+```
+
+Speech events flagged `provisional: true` come from a rolling ~10s window during
+recording. They are **replaced** by the authoritative full-audio transcript when
+the session stops — approximate now, correct later, and labelled so you can tell
+which you are reading.
+
+Timestamps are how you reach the video. Every `t` is milliseconds from `t0`,
+which is sampled inside `MediaRecorder.start()`, so event time *is* video time:
+say "watch from 02:14.320", or ask `session_frame` for that moment. Nothing
+needs to decode the recording.
 
 ## Read-only, always
 
@@ -44,8 +58,7 @@ Session ids are resolved against the actual directory listing rather than joined
 onto a path — an id arrives from a model, which makes it attacker-influenced the
 moment anyone shares a session folder, and `..` is the obvious way out.
 
-The server refuses a `schemaVersion` it does not know rather than parsing it
-best-effort, because subtly wrong answers to an agent that will act on them are
-worse than none.
+An unknown `schemaVersion` is refused rather than parsed best-effort, because
+subtly wrong answers to an agent that will act on them are worse than none.
 
 MIT.

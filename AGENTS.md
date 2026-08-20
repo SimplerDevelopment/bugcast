@@ -48,9 +48,13 @@ Breaking any of these is a bug even if every test passes.
   scripts, no `<all_urls>` host permission. Host access is requested per-origin
   at record time.
 - **One source of truth, many derived views, zero interpretation.**
-  webm → frames. timeline → report. Whisper segments → both `.srt` and inlined
-  `speech` events. A derived view is safe to materialise *because* it cannot
-  drift. A second source is not.
+  webm → frames. **`events.ndjson` → `timeline.json` → `report.md`.** Whisper
+  segments → both `.srt` and inlined `speech` events. A derived view is safe to
+  materialise *because* it cannot drift. A second source is not.
+- **Live speech is `provisional` and says so.** Rolling-window text is replaced
+  by the authoritative stop pass, which never reads it. Never emit live text
+  unflagged — a consumer discovering that a line changed under it is worse than
+  one told it might.
 
 ## Traps already paid for
 

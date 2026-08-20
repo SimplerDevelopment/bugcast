@@ -7,7 +7,7 @@
  * folder. `..` is the obvious way out of the sandbox.
  */
 
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { mkdir, readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 /** The schema this server understands. Bumped only by a breaking change. */
@@ -72,7 +72,9 @@ export async function readReport(root, id) {
 
 export async function summarise(root, id) {
   const manifest = await readManifest(root, id).catch(() => null);
-  if (!manifest) return { id, unreadable: true };
+  // A live session has no manifest yet — that is not an error, it is the most
+  // interesting session there is.
+  if (!manifest) return { id, live: await isLive(root, id), recording: true };
   const { session = {}, capture = {} } = manifest;
   return {
     id,
@@ -82,6 +84,7 @@ export async function summarise(root, id) {
     startUrl: session.startUrl,
     hasVideo: Boolean(capture.video?.enabled),
     hasTranscript: Boolean(capture.transcript?.enabled),
+    live: false,
   };
 }
 
@@ -113,6 +116,53 @@ export function filterEvents(events, { type, failedOnly, from, to, match, limit 
   return { total: filtered.length, events: filtered.slice(0, limit), truncated: filtered.length > limit };
 }
 
+/**
+ * A session still being recorded has an event stream but no timeline yet —
+ * timeline.json is only written at stop.
+ */
+export async function isLive(root, id) {
+  const has = async (f) => stat(path.join(root, id, f)).then(() => true, () => false);
+  return (await has('events.ndjson')) && !(await has('timeline.json'));
+}
+
+/**
+ * Read the append-only stream from a cursor.
+ *
+ * The cursor is a line count, not a byte offset: the file only ever grows by
+ * whole lines, so a line count is stable, human-readable, and cannot land
+ * mid-record the way a byte offset can if a write is still in flight.
+ *
+ * A trailing partial line is dropped rather than parsed — writes are batched, so
+ * a read can land between the write and its newline.
+ */
+export async function tailEvents(root, id, cursor = 0, limit = 200) {
+  const text = await readFile(path.join(root, id, 'events.ndjson'), 'utf8').catch(() => '');
+  if (!text) return { events: [], cursor, live: await isLive(root, id), total: 0 };
+
+  const lines = text.split('\n');
+  if (lines[lines.length - 1] !== '') lines.pop(); // partial trailing line
+  else lines.pop(); // the empty string after the final newline
+
+  const slice = lines.slice(cursor, cursor + limit);
+  const events = [];
+  for (const line of slice) {
+    try {
+      events.push(JSON.parse(line));
+    } catch {
+      // A line that will not parse is a line still being written. Stop here and
+      // let the next poll pick it up whole.
+      break;
+    }
+  }
+  return {
+    events,
+    cursor: cursor + events.length,
+    total: lines.length,
+    more: cursor + events.length < lines.length,
+    live: await isLive(root, id),
+  };
+}
+
 export async function readFrame(root, id, at) {
   const dir = path.join(root, id, 'frames');
   const files = await readdir(dir).catch(() => []);
@@ -133,9 +183,20 @@ export async function readFrame(root, id, at) {
   return { file: nearest.file, t: nearest.t, base64: bytes.toString('base64') };
 }
 
+/**
+ * Make sure the sessions directory exists.
+ *
+ * Created rather than demanded when absent. This server is meant to be
+ * registered once at user scope and work in every project, so failing to start
+ * because nobody has recorded yet would make it look broken on the one path
+ * that matters most: the first one. An empty directory is a correct answer to
+ * "what sessions exist".
+ */
 export async function assertReadable(root) {
   const info = await stat(root).catch(() => null);
-  if (!info?.isDirectory()) {
-    throw new Error(`--dir ${root} is not a directory. Point it at the folder you chose in the extension.`);
+  if (info?.isDirectory()) return;
+  if (info) {
+    throw new Error(`${root} exists but is not a directory. Pass --dir to point somewhere else.`);
   }
+  await mkdir(root, { recursive: true });
 }
