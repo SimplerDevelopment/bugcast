@@ -5,18 +5,22 @@
  * would put a network call in the middle of a tool whose entire premise is that
  * it runs locally.
  *
- * Only two of the four runtimes are copied. Shipping the whole directory is
- * 94MB — an unreasonable download for an extension — and most of it is variants
- * this never selects:
+ * Only the WASM backend is copied — 13MB, where shipping every runtime is
+ * ~94MB of extension download.
  *
- *   ort-wasm-simd-threaded.wasm       13MB  the WASM backend
- *   ort-wasm-simd-threaded.jsep.wasm  25MB  the WebGPU backend (JSEP)
- *   ...asyncify.wasm                  22MB  not used — asyncify is for the
- *                                           older non-JSEP async path
- *   ...jspi.wasm                      14MB  not used — needs the JSPI flag
+ * That is a deliberate trade rather than a saving. Enabling WebGPU drags in the
+ * jsep AND asyncify runtimes (the WebGPU path loads asyncify at init; excluding
+ * it is what produced "no available backend found" on a real machine), which is
+ * ~60MB more for a win nobody has demonstrated: the one primary benchmark in
+ * docs/design/issues/03 had WASM *beating* WebGPU for Whisper, contradicting
+ * vendor claims.
  *
- * Copied at build time rather than committed: they are a dependency's build
- * output, and 38MB of binaries do not belong in git.
+ * Revisit if a real measurement on real hardware says otherwise — #11's
+ * self-test reports the backend and first-inference time, which is where that
+ * evidence would come from.
+ *
+ * Copied at build time rather than committed: it is a dependency's build
+ * output, and binaries do not belong in git.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -36,8 +40,12 @@ let copied = 0;
 const WANTED = [
   'ort-wasm-simd-threaded.wasm',
   'ort-wasm-simd-threaded.mjs',
-  'ort-wasm-simd-threaded.jsep.wasm',
-  'ort-wasm-simd-threaded.jsep.mjs',
+  // Required even on the plain WASM backend, which is not obvious: the runtime
+  // loads it at init regardless of device. Excluding it produces
+  // "no available backend found ... Failed to fetch dynamically imported
+  // module", which reads like a network problem and is a missing file.
+  'ort-wasm-simd-threaded.asyncify.wasm',
+  'ort-wasm-simd-threaded.asyncify.mjs',
 ];
 
 for (const file of WANTED) {

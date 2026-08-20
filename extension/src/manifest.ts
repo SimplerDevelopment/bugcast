@@ -29,6 +29,15 @@ export default defineManifest({
   // across navigations during a session.
   optional_host_permissions: ['<all_urls>'],
 
+  // MV3's default CSP forbids WebAssembly outright — the failure is a
+  // CompileError saying "neither 'wasm-eval' nor 'unsafe-eval' is an allowed
+  // source", which reads like a code problem and is a policy one. This is the
+  // documented allowance, and it is narrow: wasm only, no eval, no remote
+  // script. Local Whisper does not run without it.
+  content_security_policy: {
+    extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'",
+  },
+
   icons: { 16: 'icons/16.png', 32: 'icons/32.png', 48: 'icons/48.png', 128: 'icons/128.png' },
   action: {
     default_popup: 'src/popup/index.html',

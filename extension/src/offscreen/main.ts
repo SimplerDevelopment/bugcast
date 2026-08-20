@@ -296,7 +296,17 @@ async function selfTest(check: 'capture' | 'asr'): Promise<{ detail: string } | 
       const canvas = document.createElement('canvas');
       canvas.width = 160;
       canvas.height = 120;
-      canvas.getContext('2d')!.fillRect(0, 0, 160, 120);
+      const paint = canvas.getContext('2d')!;
+      // Repainted on an interval, not once and not via requestAnimationFrame.
+      // captureStream only emits a frame when the canvas actually changes, and
+      // rAF is throttled to nothing in a document that is not visible — which
+      // an offscreen document never is. Painting once makes this check pass or
+      // fail on timing luck.
+      let tick = 0;
+      const repaint = setInterval(() => {
+        paint.fillStyle = tick++ % 2 ? '#000' : '#fff';
+        paint.fillRect(0, 0, 160, 120);
+      }, 50);
 
       const mimeType = pickMimeType((t) => MediaRecorder.isTypeSupported(t));
       if (!mimeType) throw new Error('No supported WebM profile in this browser');
@@ -321,6 +331,7 @@ async function selfTest(check: 'capture' | 'asr'): Promise<{ detail: string } | 
         recorder.onstop = () => r();
         recorder.stop();
       });
+      clearInterval(repaint);
       osc.stop();
       await context.close();
       await audio.close();
@@ -418,4 +429,5 @@ async function openSessionStream(session: string): Promise<FileSystemWritableFil
   buildPipeline,
   pickMimeType,
   extractFrames,
+  transformersEngine,
 };

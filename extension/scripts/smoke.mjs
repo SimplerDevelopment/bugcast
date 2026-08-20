@@ -189,9 +189,14 @@ console.log((stopped.report ?? '(none)').split('\n').slice(0, 40).join('\n'));
 // The self-test is reachable from any extension page, so the harness can run
 // the real thing. No folder is chosen here, so `disk` is expected to fail —
 // which is itself worth asserting: the failure has to name what to do.
-console.log('\n=== self-test (cdp + disk only; asr downloads a model) ===');
-const selfTest = await ext.evaluate((type) => chrome.runtime.sendMessage({ type }), 'bugcast/run-self-test');
-for (const c of (selfTest?.checks ?? []).filter((c) => c.id === 'cdp' || c.id === 'disk')) {
+console.log('\n=== self-test (asr excluded — it downloads a model) ===');
+// Not `asr`: it downloads a speech model, which is exactly what that check is
+// for and several minutes nobody wants on every push.
+const selfTest = await ext.evaluate(
+  (type) => chrome.runtime.sendMessage({ type, only: ['cdp', 'disk', 'capture'] }),
+  'bugcast/run-self-test',
+);
+for (const c of selfTest?.checks ?? []) {
   console.log(`${c.ok ? 'PASS' : 'fail'}  ${c.label} — ${c.detail} (${c.ms}ms)`);
 }
 const cdp = (selfTest?.checks ?? []).find((c) => c.id === 'cdp');

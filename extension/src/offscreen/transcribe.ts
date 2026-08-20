@@ -32,6 +32,19 @@ export const MODELS: Record<ModelTier, string> = {
 
 export const DEFAULT_TIER: ModelTier = 'base.en';
 
+/**
+ * Per-module, because Whisper's encoder and decoder do not quantize the same
+ * way — and a uniform `q8` is specifically broken: it fails at session creation
+ * with "Missing required scale ... TransposeDQWeightsForMatMulNBits", which
+ * reads like a corrupt download and is a dtype mismatch.
+ *
+ * Verified on a real machine: `fp32`, `q4`, and this all load and infer. This
+ * one is chosen because it is roughly a sixth of the download of `fp32`
+ * (~45MB against ~290MB for base.en), and a first-run download is the most
+ * expensive thing this tool asks of anyone.
+ */
+export const DTYPE = { encoder_model: 'q8', decoder_model_merged: 'q4' };
+
 /** Below this there is no speech worth a model download. */
 export const MIN_SAMPLES = 16_000; // one second
 
@@ -55,7 +68,7 @@ export function chunksToSegments(
 
 let cached: Promise<any> | null = null;
 
-async function load(tier: ModelTier): Promise<any> {
+async function load(tier: ModelTier, dtype: unknown = DTYPE): Promise<any> {
   const { env, pipeline } = await import('@huggingface/transformers');
 
   // Local runtime binaries. Without this transformers.js fetches them from a
@@ -69,26 +82,34 @@ async function load(tier: ModelTier): Promise<any> {
   // once and caches forever. An offline path is loading it from disk instead.
   env.allowRemoteModels = true;
 
-  // WebGPU where available, WASM otherwise. Deliberately not assumed to be
-  // faster — one primary benchmark had WASM *beating* WebGPU for Whisper,
-  // contradicting vendor claims, and docs/design/issues/13 deferred settling it
-  // to a real measurement on real hardware (#11's self-test).
-  const device = 'gpu' in navigator ? 'webgpu' : 'wasm';
-
+  // WASM, not WebGPU, and pinned rather than auto-selected.
+  //
+  // WebGPU is not merely unproven here — the one primary benchmark in
+  // docs/design/issues/03 had WASM beating it for Whisper — it also costs ~60MB
+  // of extra runtime binaries in the extension download, because the WebGPU
+  // path pulls in both the jsep and asyncify runtimes. Shipping only the WASM
+  // runtime and then letting the code ask for WebGPU is how you get "no
+  // available backend found" on a real machine, which is exactly what happened.
+  //
+  // If a real measurement ever favours WebGPU, both halves change together:
+  // this line and scripts/copy-ort.mjs.
   return pipeline('automatic-speech-recognition', MODELS[tier], {
-    device: device as never,
-    dtype: device === 'webgpu' ? ('fp32' as never) : ('q8' as never),
+    device: 'wasm' as never,
+    dtype: dtype as never,
   });
 }
 
-export function transformersEngine(tier: ModelTier = DEFAULT_TIER): TranscriptionEngine {
+export function transformersEngine(
+  tier: ModelTier = DEFAULT_TIER,
+  dtype: unknown = DTYPE,
+): TranscriptionEngine {
   return {
     async transcribe(samples, t0Offset) {
       // No speech simply means no .srt. Mic is optional by design and must
       // never cost the recording.
       if (samples.length < MIN_SAMPLES) return [];
 
-      cached ??= load(tier);
+      cached ??= load(tier, dtype);
       const asr = await cached;
 
       const out = await asr(samples, {

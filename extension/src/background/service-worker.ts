@@ -47,6 +47,12 @@ interface Recording {
 let active: Recording | null = null;
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  // sendMessage broadcasts to every extension context, so a message addressed
+  // to the offscreen document arrives here too. The worker never sees its own
+  // sends, which hides this in normal operation — but anything else in the
+  // extension talking to the recorder would race, and the worker would win with
+  // "Unknown message".
+  if (msg?.target === 'offscreen') return;
   handle(msg).then(sendResponse, (e) => sendResponse({ error: String(e?.message ?? e) }));
   return true; // async response
 });
@@ -63,7 +69,7 @@ async function handle(msg: any): Promise<Response> {
       recordInteraction(msg);
       return { ok: true, recording: active !== null };
     case RUN_SELF_TEST:
-      return { ok: true, recording: active !== null, checks: await selfTest() } as never;
+      return { ok: true, recording: active !== null, checks: await selfTest(msg.only) } as never;
     case DROP_MARKER:
       return { ok: true, recording: dropMarker(msg.note || 'Marked') };
     default:
@@ -544,7 +550,7 @@ async function closeOffscreen(): Promise<void> {
  * Ordered cheapest-first so a user waiting on the model download has already
  * seen the other three resolve.
  */
-async function selfTest(): Promise<unknown> {
+async function selfTest(only?: string[]): Promise<unknown> {
   const checks: Check[] = [
     {
       id: 'cdp',
@@ -595,7 +601,9 @@ async function selfTest(): Promise<unknown> {
     },
   ];
 
-  const results = await runChecks(checks);
+  // `only` exists for CI: the speech check downloads a model, which is the
+  // point of it and also several minutes nobody wants on every push.
+  const results = await runChecks(only ? checks.filter((c) => only.includes(c.id)) : checks);
   await closeOffscreen();
   return results;
 }

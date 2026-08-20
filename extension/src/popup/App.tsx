@@ -28,9 +28,9 @@ function originOf(url: string | undefined): string | null {
 }
 
 const TIER_LABELS: Record<ModelTier, string> = {
-  'tiny.en': 'Tiny — fastest, roughest (~75 MB)',
-  'base.en': 'Base — recommended (~145 MB)',
-  'small.en': 'Small — most accurate, slowest (~470 MB)',
+  'tiny.en': 'Tiny — fastest, roughest (~20 MB)',
+  'base.en': 'Base — recommended (~45 MB)',
+  'small.en': 'Small — most accurate, slowest (~130 MB)',
 };
 
 export function App() {
