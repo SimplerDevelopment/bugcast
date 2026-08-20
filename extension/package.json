@@ -2,11 +2,11 @@
   "name": "bugcast-extension",
   "private": true,
   "version": "0.1.0",
-  "description": "Bugcast — local-first video QA recorder for Chrome.",
+  "description": "Bugcast \u2014 local-first video QA recorder for Chrome.",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build && vite build -c vite.content.config.ts && vite build -c vite.offscreen.config.ts && node scripts/copy-ort.mjs",
+    "build": "node scripts/gen-icons.mjs && vite build && vite build -c vite.content.config.ts && vite build -c vite.offscreen.config.ts && node scripts/copy-ort.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "smoke": "bun run build && node scripts/smoke.mjs"

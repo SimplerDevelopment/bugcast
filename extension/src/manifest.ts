@@ -29,7 +29,11 @@ export default defineManifest({
   // across navigations during a session.
   optional_host_permissions: ['<all_urls>'],
 
-  action: { default_popup: 'src/popup/index.html' },
+  icons: { 16: 'icons/16.png', 32: 'icons/32.png', 48: 'icons/48.png', 128: 'icons/128.png' },
+  action: {
+    default_popup: 'src/popup/index.html',
+    default_icon: { 16: 'icons/16.png', 32: 'icons/32.png', 48: 'icons/48.png' },
+  },
 
   // A keyboard shortcut is a user gesture, which is what makes starting from
   // one possible at all — Chrome grants activeTab for commands exactly as it
