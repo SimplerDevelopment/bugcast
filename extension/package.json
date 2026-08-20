@@ -2,12 +2,13 @@
   "name": "bugcast-extension",
   "private": true,
   "version": "0.1.0",
-  "description": "Bugcast — local-first video QA recorder for Chrome.",
+  "description": "Bugcast \u2014 local-first video QA recorder for Chrome.",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "react": "^19.0.0",
@@ -26,6 +27,7 @@
     "postcss": "^8.4.49",
     "tailwindcss": "^4.0.0",
     "typescript": "^5.7.2",
-    "vite": "^6.0.5"
+    "vite": "^6.0.5",
+    "vitest": "^4.1.11"
   }
 }
