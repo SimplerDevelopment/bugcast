@@ -33,6 +33,7 @@ import {
 } from '../lib/recorder';
 import {
   OFFSCREEN_ERROR,
+  OFFSCREEN_FLUSH_VIDEO,
   OFFSCREEN_FRAMES,
   OFFSCREEN_SELF_TEST,
   OFFSCREEN_START,
@@ -89,6 +90,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   const handlers: Record<string, () => Promise<unknown>> = {
     [OFFSCREEN_START]: () => start(msg),
     [OFFSCREEN_STOP]: () => stop(),
+    [OFFSCREEN_FLUSH_VIDEO]: () => flushVideo(msg.sessionId),
     [OFFSCREEN_FRAMES]: () => frames(msg),
     [OFFSCREEN_SELF_TEST]: () => selfTest(msg.check, msg.tier ?? DEFAULT_TIER),
     [OFFSCREEN_ZIP]: () => zipSession(msg),
@@ -151,7 +153,14 @@ async function start(msg: {
 
   const { recorder, context, pcm } = await buildPipeline(tabStream, micStream, mimeType);
 
-  const writable = await openSessionStream(msg.sessionId).catch(() => null);
+  // A failure here is not fatal — chunks buffer in memory and are flushed at
+  // stop instead — but it must be *reported*, because the buffered path is the
+  // one that used to lose the video entirely.
+  let streamError: string | null = null;
+  const writable = await openSessionStream(msg.sessionId).catch((e) => {
+    streamError = String((e as Error)?.message ?? e);
+    return null;
+  });
   const state: Live = {
     recorder,
     context,
@@ -191,7 +200,14 @@ async function start(msg: {
 
   live = state;
   tier = msg.tier ?? DEFAULT_TIER;
-  return { type: OFFSCREEN_STARTED, t0, mimeType, withMic: Boolean(micStream), micError };
+  return {
+    type: OFFSCREEN_STARTED,
+    t0,
+    mimeType,
+    withMic: Boolean(micStream),
+    micError,
+    streamError,
+  };
 }
 
 async function stop(): Promise<unknown> {
@@ -239,6 +255,9 @@ async function stop(): Promise<unknown> {
     bytes: state.bytes,
     pcmSamples: total,
     videoWritten: state.writable !== null,
+    // Held in memory because the stream could not be opened at start. The
+    // worker asks for a flush once it knows the folder is usable.
+    videoBuffered: lastBuffered.length > 0,
     segments,
     transcriptError,
   };
@@ -311,6 +330,32 @@ export async function buildPipeline(
  * Runs here rather than in the worker because it needs a <video>, a canvas and
  * `requestVideoFrameCallback`, none of which exist in a service worker.
  */
+/**
+ * Write the recording that had to be buffered.
+ *
+ * The streaming path is the normal one; this exists for when opening the file
+ * at record start failed — most often a File System Access grant that lapsed
+ * between choosing the folder and pressing Record. Without it those chunks were
+ * simply discarded at stop, which is how a session arrived complete except for
+ * the video.
+ */
+async function flushVideo(sessionId: string): Promise<unknown> {
+  if (!lastBuffered.length) return { ok: true, bytes: 0 };
+  const blob = new Blob(lastBuffered, { type: 'video/webm' });
+
+  const dir = await idbGet<FileSystemDirectoryHandle>('sessionDirectory');
+  if (!dir) return { ok: false, error: 'No sessions folder' };
+
+  const folder = await dir.getDirectoryHandle(sessionId, { create: true });
+  const file = await folder.getFileHandle('video.webm', { create: true });
+  const writable = await file.createWritable();
+  await writable.write(await blob.arrayBuffer());
+  await writable.close();
+
+  lastBuffered = [];
+  return { ok: true, bytes: blob.size };
+}
+
 async function frames(msg: { sessionId: string; plan: PlannedFrame[] }): Promise<unknown> {
   if (!msg.plan?.length) return { written: 0, missed: 0 };
 

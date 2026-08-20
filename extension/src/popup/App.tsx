@@ -48,6 +48,7 @@ export function App() {
   const [checks, setChecks] = useState<CheckResult[] | null>(null);
   const [last, setLast] = useState<{
     id: string; written: string | null; writeError: string | null; events: number; frames: number;
+    video?: boolean; videoBytes?: number;
   } | null>(null);
   const [testing, setTesting] = useState(false);
   const [mic, setMic] = useState<PermissionState | 'unknown'>('unknown');
@@ -306,6 +307,9 @@ export function App() {
           <div className="break-all text-neutral-500">{last.id}</div>
           <div className="text-neutral-500">
             {last.events} events{last.frames ? `, ${last.frames} frames` : ''}
+            {last.video
+              ? `, video ${Math.round((last.videoBytes ?? 0) / 1024)} KB`
+              : ', no video'}
           </div>
           {last.written ? (
             <div className="break-all text-green-700">→ {last.written}</div>

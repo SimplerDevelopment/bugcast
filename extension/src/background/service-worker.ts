@@ -15,6 +15,7 @@ import {
   OFFSCREEN_SELF_TEST,
   RUN_SELF_TEST,
   INTERACTION,
+  OFFSCREEN_FLUSH_VIDEO,
   OFFSCREEN_FRAMES,
   OFFSCREEN_START,
   OFFSCREEN_STOP,
@@ -185,7 +186,21 @@ async function stop(): Promise<Response> {
   // arrive interleaved and slightly out of order.
   events.sort((a, b) => a.t - b.t);
 
-  const capture = (await stopCapture()) as { segments?: Segment[] } | null;
+  const capture = (await stopCapture()) as
+    | { segments?: Segment[]; videoBuffered?: boolean; bytes?: number }
+    | null;
+
+  // The recording could not be streamed to disk — usually a File System Access
+  // grant that lapsed between choosing the folder and pressing Record. Flush it
+  // now, before frames, which read the file back.
+  let videoOnDisk = video;
+  if (capture?.videoBuffered) {
+    const flushed = (await flushVideo(id)) as { ok?: boolean; error?: string } | null;
+    videoOnDisk = Boolean(flushed?.ok);
+    if (!flushed?.ok) {
+      console.warn('[bugcast] buffered video could not be written', flushed?.error);
+    }
+  }
 
   // Speech joins the same flat array as everything else, then the whole thing
   // sorts once. The ordering is the information: narration lands *before* the
@@ -202,7 +217,7 @@ async function stop(): Promise<Response> {
   // which in the zip fallback it never is. No folder means no frame index.
   const hasFolder = Boolean(await storedSessionDirectory());
   let frames = { written: 0, missed: 0 };
-  if (video && hasFolder) {
+  if (videoOnDisk && hasFolder) {
     const plan = planFrames(events);
     for (const frame of plan) for (const i of frame.events) events[i]!.frame = frame.path;
     frames = ((await extractFrames(id, plan)) as typeof frames) ?? frames;
@@ -214,7 +229,7 @@ async function stop(): Promise<Response> {
   let report = '';
   try {
     report = renderSessionReport(id, title, startedAt, startUrl, events, redaction);
-    const files = sessionFiles(id, startedAt, startUrl, events, redaction, report, video, segments, frames.written);
+    const files = sessionFiles(id, startedAt, startUrl, events, redaction, report, videoOnDisk, segments, frames.written);
     if (hasFolder) {
       try {
         written = await writeSession(id, files);
@@ -264,7 +279,17 @@ async function stop(): Promise<Response> {
   // so a result that lives only in its state is one the user may never see —
   // which is how a failed write ends up looking like nothing happened at all.
   await chrome.storage.local.set({
-    lastSession: { id, written, writeError, events: events.length, frames: frames.written },
+    lastSession: {
+      id,
+      written,
+      writeError,
+      events: events.length,
+      frames: frames.written,
+      // Reported explicitly, because "everything except the video" was
+      // impossible to diagnose from the folder alone.
+      video: videoOnDisk,
+      videoBytes: capture?.bytes ?? 0,
+    },
   });
 
   return { ok: true, recording: false, events, redaction, sessionId: id, written, writeError, report, capture, frames };
@@ -576,7 +601,12 @@ async function storedTier(): Promise<string> {
 async function startCapture(
   tabId: number,
   session: string,
-): Promise<{ t0: number; withMic: boolean; micError: string | null } | null> {
+): Promise<{
+  t0: number;
+  withMic: boolean;
+  micError: string | null;
+  streamError: string | null;
+} | null> {
   await ensureOffscreen();
 
   // MV3 mints a stream id in the worker which the offscreen document then
@@ -603,7 +633,12 @@ async function startCapture(
     tier: await storedTier(),
   });
   if (!res || res.error) throw new Error(res?.error ?? 'Capture failed to start');
-  return { t0: res.t0, withMic: Boolean(res.withMic), micError: res.micError ?? null };
+  return {
+    t0: res.t0,
+    withMic: Boolean(res.withMic),
+    micError: res.micError ?? null,
+    streamError: res.streamError ?? null,
+  };
 }
 
 async function stopCapture(): Promise<unknown> {
@@ -615,6 +650,14 @@ async function stopCapture(): Promise<unknown> {
   // is minutes of work behind a single message.
   return whileAlive(() =>
     chrome.runtime.sendMessage({ target: 'offscreen', type: OFFSCREEN_STOP }).catch(() => null),
+  );
+}
+
+async function flushVideo(session: string): Promise<unknown> {
+  return whileAlive(() =>
+    chrome.runtime
+      .sendMessage({ target: 'offscreen', type: OFFSCREEN_FLUSH_VIDEO, sessionId: session })
+      .catch((e) => ({ ok: false, error: String(e?.message ?? e) })),
   );
 }
 

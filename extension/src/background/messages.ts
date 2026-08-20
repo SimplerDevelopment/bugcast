@@ -1,3 +1,4 @@
+export const OFFSCREEN_FLUSH_VIDEO = 'bugcast/offscreen-flush-video';
 export const OFFSCREEN_ZIP = 'bugcast/offscreen-zip';
 export const RUN_SELF_TEST = 'bugcast/run-self-test';
 export const OFFSCREEN_SELF_TEST = 'bugcast/offscreen-self-test';
