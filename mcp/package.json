@@ -1,0 +1,35 @@
+{
+  "name": "bugcast",
+  "version": "0.1.0",
+  "description": "Query bugcast QA session folders from a coding agent. Read-only MCP server.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "bugcast": "src/index.mjs"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SimplerDevelopment/bugcast.git"
+  },
+  "keywords": [
+    "mcp",
+    "qa",
+    "debugging",
+    "chrome-extension",
+    "local-first"
+  ],
+  "scripts": {
+    "test": "node --test src",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}

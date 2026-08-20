@@ -125,12 +125,13 @@ drive — they need a human, and this is already recorded in
 - `extension/src/lib/` — pure, tested modules. Prefer putting logic here.
 - `extension/src/background/` — the service worker: orchestration only.
 - `extension/src/content/` — injected at record time, never declared.
+- `mcp/` — the optional npm package. Plain ESM, no build step, `node --test`.
+  Read-only by rule; never add a tool that writes.
 
 ## Status
 
 Shipped: #1 clock · #2 CDP capture · #3 redaction · #7 disk output ·
 #4 interactions · #9 artifact assembly · #5 offscreen capture · #6 transcription ·
-#8 frame index · #10 recording UX · #11 self-test.
+#8 frame index · #10 recording UX · #11 self-test · #12 MCP server.
 
-Open: #12 MCP server ·
-#13 CI and release · #14 CORS row reads as 200 · #15 zip fallback.
+Open: #13 CI and release · #14 CORS row reads as 200 · #15 zip fallback.

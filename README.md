@@ -59,6 +59,29 @@ No terminal, no compiler, no sidecar process. That's deliberate — see
 [the design notes](docs/design/issues/03-local-transcription-real-costs.md) for
 why the obvious `whisper.cpp` approach doesn't work.
 
+## Hand a session to a coding agent
+
+Point it at `report.md` and you're done — that's the whole handoff, and it needs
+nothing installed.
+
+For longer sessions, where the raw timeline runs to tens of thousands of tokens,
+there's an optional read-only MCP server so your agent can ask "what failed"
+instead of reading everything:
+
+```jsonc
+{
+  "mcpServers": {
+    "bugcast": {
+      "command": "npx",
+      "args": ["-y", "bugcast", "--dir", "/path/to/your/sessions"]
+    }
+  }
+}
+```
+
+See [`mcp/`](mcp/) for the tools. It is strictly optional — recording never
+depends on it.
+
 ## Status
 
 **Design complete, implementation starting.** Every architectural decision is
