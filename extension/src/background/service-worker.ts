@@ -5,6 +5,8 @@ import type { TimelineEvent } from '../lib/events';
 import { DefaultRedactor } from '../lib/redact';
 import { SCHEMA_VERSION } from '../lib/events';
 import { sessionId, storedSessionDirectory, writeFile } from '../lib/session-store';
+import { renderReport } from '../lib/report';
+import type { RedactionSummary } from '../lib/redact';
 import {
   INTERACTION,
   RECORDING_STATE,
@@ -20,6 +22,14 @@ interface Recording {
   events: TimelineEvent[];
   startedAt: Date;
   redactor: DefaultRedactor;
+  /** The page title at record time — the only human-readable name available. */
+  title: string;
+  /**
+   * Where the session began. Held separately because `ctx.pageUrl` is *current*
+   * page context and navigation mutates it — reading it at stop time reported
+   * the last URL as the first one.
+   */
+  startUrl: string;
 }
 
 let active: Recording | null = null;
@@ -34,7 +44,7 @@ async function handle(msg: any): Promise<Response> {
     case RECORDING_STATE:
       return { ok: true, recording: active !== null };
     case START_RECORDING:
-      return start(msg.tabId, msg.pageUrl);
+      return start(msg.tabId, msg.pageUrl, msg.title);
     case STOP_RECORDING:
       return stop();
     case INTERACTION:
@@ -45,7 +55,7 @@ async function handle(msg: any): Promise<Response> {
   }
 }
 
-async function start(tabId?: number, pageUrl?: string): Promise<Response> {
+async function start(tabId?: number, pageUrl?: string, title?: string): Promise<Response> {
   if (active) return { ok: true, recording: true };
 
   const tab =
@@ -95,14 +105,21 @@ async function start(tabId?: number, pageUrl?: string): Promise<Response> {
     active = null;
   };
 
-  active = { cdp, ctx, events, startedAt, redactor };
+  active = {
+    cdp,
+    ctx,
+    events,
+    startedAt,
+    redactor,
+    title: title || tab.title || tab.url || 'Session',
+    startUrl: ctx.pageUrl,
+  };
   return { ok: true, recording: true };
 }
 
 async function stop(): Promise<Response> {
   if (!active) return { ok: true, recording: false };
-  const { cdp, events, startedAt, redactor } = active;
-  const startUrl = active.ctx.pageUrl;
+  const { cdp, events, startedAt, redactor, title, startUrl } = active;
   active = null;
   await cdp.detach();
   await unregisterInteractionCapture();
@@ -114,15 +131,47 @@ async function stop(): Promise<Response> {
   const id = sessionId(startedAt, startUrl);
   const redaction = redactor.summary();
   let written: string | null = null;
+  let report = '';
   try {
-    written = await writeSession(id, startedAt, startUrl, events, redaction);
+    report = renderSessionReport(id, title, startedAt, startUrl, events, redaction);
+    written = await writeSession(id, startedAt, startUrl, events, redaction, report);
   } catch (e) {
     // A failed write must not swallow the session — the caller still gets the
     // events, so a folder problem costs a save rather than the recording.
     console.error('[bugcast] could not write session', e);
   }
 
-  return { ok: true, recording: false, events, redaction, sessionId: id, written };
+  return { ok: true, recording: false, events, redaction, sessionId: id, written, report };
+}
+
+function durationOf(events: TimelineEvent[]): number {
+  return events.length ? Math.max(...events.map((e) => e.tEnd ?? e.t)) : 0;
+}
+
+function renderSessionReport(
+  id: string,
+  title: string,
+  startedAt: Date,
+  startUrl: string,
+  events: TimelineEvent[],
+  redaction: RedactionSummary,
+): string {
+  return renderReport(
+    {
+      id,
+      title,
+      startedAt,
+      startUrl,
+      durationMs: durationOf(events),
+      userAgent: navigator.userAgent,
+      redaction,
+      files: [
+        ['timeline.json', `${events.length} events — full detail, the source of truth`],
+        ['session.json', 'manifest — capture config, environment, redaction summary'],
+      ],
+    },
+    events,
+  );
 }
 
 async function writeSession(
@@ -131,11 +180,12 @@ async function writeSession(
   startUrl: string,
   events: TimelineEvent[],
   redaction: unknown,
+  report: string,
 ): Promise<string> {
   const dir = await storedSessionDirectory();
   if (!dir) throw new Error('No sessions folder has been chosen.');
 
-  const durationMs = events.length ? Math.max(...events.map((e) => e.tEnd ?? e.t)) : 0;
+  const durationMs = durationOf(events);
 
   // Both files carry schemaVersion so either is interpretable alone — which is
   // how an agent will actually read them. Additive changes do not bump it;
@@ -173,7 +223,7 @@ async function writeSession(
             'Redaction is best-effort heuristics, not a guarantee. Review before sharing.',
           ],
         },
-        files: { timeline: 'timeline.json' },
+        files: { timeline: 'timeline.json', report: 'report.md' },
       },
       null,
       2,
@@ -186,6 +236,8 @@ async function writeSession(
     'timeline.json',
     JSON.stringify({ schemaVersion: SCHEMA_VERSION, sessionId: id, t0Epoch: startedAt.getTime(), events }, null, 2),
   );
+
+  await writeFile(dir, id, 'report.md', report);
 
   return `${dir.name}/${id}`;
 }

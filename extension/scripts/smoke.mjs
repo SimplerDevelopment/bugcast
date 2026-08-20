@@ -115,8 +115,8 @@ const ext = await ctx.newPage();
 await ext.goto(`chrome-extension://${extId}/src/popup/index.html`);
 
 const started = await ext.evaluate(
-  ([type, tabId, pageUrl]) => chrome.runtime.sendMessage({ type, tabId, pageUrl }),
-  ['bugcast/start-recording', tabId, `http://localhost:${PORT}/`],
+  ([type, tabId, pageUrl, title]) => chrome.runtime.sendMessage({ type, tabId, pageUrl, title }),
+  ['bugcast/start-recording', tabId, `http://localhost:${PORT}/`, 'bugcast smoke'],
 );
 console.log('start ->', JSON.stringify(started));
 if (started?.error) {
@@ -166,6 +166,9 @@ const stopped = await ext.evaluate(
 // The directory grant cannot be scripted — showDirectoryPicker opens a native
 // OS dialog. So this asserts the *degradation*: with no folder chosen, the
 // session must still come back rather than being lost to a write failure.
+console.log('\n=== report.md (first 40 lines) ===');
+console.log((stopped.report ?? '(none)').split('\n').slice(0, 40).join('\n'));
+
 console.log('\n=== disk ===');
 console.log('sessionId:', stopped.sessionId);
 console.log('written:  ', stopped.written ?? '(no folder chosen — expected in this harness)');

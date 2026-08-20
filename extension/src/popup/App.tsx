@@ -85,6 +85,7 @@ export function App() {
         type: START_RECORDING,
         tabId: tab?.id,
         pageUrl: tab?.url,
+        title: tab?.title,
       });
       if (res?.error) setError(res.error);
       else setRecording(true);

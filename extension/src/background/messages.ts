@@ -12,6 +12,8 @@ export interface StartMessage {
   tabId?: number;
   /** The popup reads this too — see the worker for why it is not re-read there. */
   pageUrl?: string;
+  /** The page title at record time — the only human-readable session name. */
+  title?: string;
 }
 
 export type Response =
@@ -24,5 +26,6 @@ export type Response =
       sessionId: string;
       /** `folder/session-id`, or null if the write failed. */
       written: string | null;
+      report: string;
     }
   | { error: string };
