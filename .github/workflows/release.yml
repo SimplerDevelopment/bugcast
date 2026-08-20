@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+# Both artifacts ship from one tag, so their versions agree by construction even
+# though they install separately — which is what makes the MCP server's
+# schemaVersion refusal a promise rather than a guess.
+jobs:
+  extension:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+        working-directory: extension
+      - run: bun run build
+        working-directory: extension
+
+      # The unpacked-loadable zip. Published on day one and permanently, not as
+      # a stopgap: it serves users whose policy blocks the Web Store or
+      # developer mode, users who want to read the source before trusting it
+      # with their screen, and everyone during any review gap.
+      - run: cd extension/dist && zip -qr ../../bugcast-${{ github.ref_name }}.zip .
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: bugcast-${{ github.ref_name }}.zip
+          generate_release_notes: true
+          body: |
+            ## Install
+
+            1. Download `bugcast-${{ github.ref_name }}.zip` below and unzip it.
+            2. Go to `chrome://extensions`, turn on **Developer mode**, click
+               **Load unpacked**, and select the unzipped folder.
+            3. Click the Bugcast icon and press **Record**.
+
+            ⚠️ Sessions may contain secrets even with redaction on, and video is
+            not redactable at all. See the README before sharing one.
+
+  mcp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+      - run: npm install --no-audit --no-fund
+        working-directory: mcp
+      - run: npm test
+        working-directory: mcp
+      # Skipped rather than failed when the token is absent, so a tag still
+      # produces the extension release on a fork or before npm is set up.
+      - if: env.NODE_AUTH_TOKEN != ''
+        run: npm publish --access public
+        working-directory: mcp
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

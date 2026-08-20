@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  extension:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extension
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run test
+      - run: bun run build
+
+      # The unit tests cover pure functions. They cannot tell you whether the
+      # debugger attaches, whether the AudioWorklet loads, or whether eager body
+      # capture returns bodies — and every one of those has broken at least once.
+      # Headed under xvfb, because Playwright's headless shell does not load
+      # extensions at all.
+      - run: bunx playwright install --with-deps chromium
+      - run: xvfb-run -a node scripts/smoke.mjs
+
+  mcp:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install --no-audit --no-fund
+      - run: npm test
+      # Speaks real MCP over stdio against the example session in docs/design.
+      - run: npm run smoke
