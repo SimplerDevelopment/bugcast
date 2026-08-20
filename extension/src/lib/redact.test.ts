@@ -179,3 +179,22 @@ describe('luhn', () => {
     expect(luhn('123')).toBe(false); // too short to be a card at all
   });
 });
+
+describe('regressions caught by the smoke test', () => {
+  it('does not redact an error body\'s `code` — it is the most diagnostic field there is', () => {
+    const body = '{"success":false,"error":{"code":"DB_ERROR","message":"column \\"x\\" does not exist"}}';
+    const out = new DefaultRedactor().body(body, 'application/json');
+    expect(out).toContain('DB_ERROR');
+    expect(out).toContain('does not exist');
+  });
+
+  it('does not redact `state` in a body — in JSON that is React state, not OAuth', () => {
+    expect(new DefaultRedactor().body('{"state":"editing"}', 'application/json')).toContain('editing');
+  });
+
+  it('still redacts code and state as URL parameters, where they are OAuth', () => {
+    const out = new DefaultRedactor().url('https://x.test/cb?code=abc&state=xyz');
+    expect(out).not.toContain('code=abc');
+    expect(out).not.toContain('state=xyz');
+  });
+});

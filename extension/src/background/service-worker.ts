@@ -14,27 +14,30 @@ interface Recording {
 let active: Recording | null = null;
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  handle(msg?.type).then(sendResponse, (e) => sendResponse({ error: String(e?.message ?? e) }));
+  handle(msg).then(sendResponse, (e) => sendResponse({ error: String(e?.message ?? e) }));
   return true; // async response
 });
 
-async function handle(type: string | undefined): Promise<Response> {
-  switch (type) {
+async function handle(msg: any): Promise<Response> {
+  switch (msg?.type) {
     case RECORDING_STATE:
       return { ok: true, recording: active !== null };
     case START_RECORDING:
-      return start();
+      return start(msg.tabId, msg.pageUrl);
     case STOP_RECORDING:
       return stop();
     default:
-      return { error: `Unknown message: ${type}` };
+      return { error: `Unknown message: ${msg?.type}` };
   }
 }
 
-async function start(): Promise<Response> {
+async function start(tabId?: number, pageUrl?: string): Promise<Response> {
   if (active) return { ok: true, recording: true };
 
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tab =
+    tabId == null
+      ? (await chrome.tabs.query({ active: true, currentWindow: true }))[0]
+      : await chrome.tabs.get(tabId);
   if (!tab?.id) return { error: 'No active tab to record.' };
 
   const cdp = new CdpSession();
@@ -51,7 +54,10 @@ async function start(): Promise<Response> {
     // Until then the CDP clock still needs an origin, and Date.now() here is
     // the same instant to within the attach round-trip.
     t0: Date.now(),
-    pageUrl: tab.url ?? '',
+    // The popup passes this. Without the broad `tabs` permission a worker can
+    // only read tab.url when activeTab has been granted by a user gesture, and
+    // relying on that would make page context silently empty in other flows.
+    pageUrl: pageUrl ?? tab.url ?? '',
     emit: (event) => events.push(event),
     // Runs in memory, before anything is serialized — the raw value never
     // reaches disk. See lib/redact.ts.
@@ -60,6 +66,11 @@ async function start(): Promise<Response> {
 
   new NetworkCapture(cdp, ctx).start();
   new PageCapture(cdp, ctx).start();
+
+  // Recording almost always starts on an already-loaded page, so
+  // Page.frameNavigated never fires for it and the timeline would never say
+  // where the session began. Found by the smoke test.
+  events.push({ type: 'navigation', t: 0, pageUrl: ctx.pageUrl, trigger: 'load', from: null });
 
   cdp.detachedCallback = () => {
     // The user dismissed the infobar mid-session. The session is over either
@@ -80,8 +91,7 @@ async function stop(): Promise<Response> {
   // Events are sorted once, at the end — the flat timeline is the contract,
   // and sources arrive interleaved and slightly out of order.
   events.sort((a, b) => a.t - b.t);
-  // ponytail: disk output is #7, artifact assembly is #9.
+  // ponytail: until #7 writes to disk, the response *is* the output.
   console.log(`[bugcast] captured ${events.length} events`, events);
-  console.log('[bugcast] redaction', ctx.redactor.summary());
-  return { ok: true, recording: false };
+  return { ok: true, recording: false, events, redaction: ctx.redactor.summary() };
 }

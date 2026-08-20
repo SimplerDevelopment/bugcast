@@ -1,0 +1,146 @@
+// End-to-end smoke test: launch a real Chromium with the built extension,
+// record a session against a server that produces the failures the design
+// actually cares about, and print what came back.
+//
+// Nothing here is a unit test — it is the only way to find out whether the
+// debugger actually attaches, whether setAutoAttach fires, and whether the
+// eager body pull returns bodies. It has already earned its keep twice: it
+// caught the redactor destroying an error response's `code` field, and the
+// missing initial navigation event.
+//
+//   bun run smoke
+import { chromium } from 'playwright';
+import { fileURLToPath } from 'node:url';
+import http from 'node:http';
+import os from 'node:os';
+import fs from 'node:fs';
+import path from 'node:path';
+
+const EXT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'dist');
+if (!fs.existsSync(EXT)) {
+  console.error(`No build at ${EXT} — run \`bun run build\` first.`);
+  process.exit(1);
+}
+let PORT = 0; // assigned by the OS — a fixed port collides with a stale run
+
+const server = http.createServer((req, res) => {
+  const url = new URL(req.url, `http://localhost:${PORT}`);
+  const cors = { 'Access-Control-Allow-Origin': '*' };
+  if (url.pathname === '/') {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end('<!doctype html><title>bugcast smoke</title><h1>smoke</h1>');
+  } else if (url.pathname === '/ok') {
+    res.writeHead(200, { ...cors, 'content-type': 'application/json' });
+    res.end('{"ok":true}');
+  } else if (url.pathname === '/e500') {
+    res.writeHead(500, { ...cors, 'content-type': 'application/json' });
+    res.end('{"success":false,"error":{"code":"DB_ERROR","message":"column \\"cdn_cache_enabled\\" of relation \\"posts\\" does not exist"}}');
+  } else if (url.pathname === '/nocors') {
+    res.writeHead(200, { 'content-type': 'application/json' }); // no ACAO — blocked
+    res.end('{"secret":"should never be captured"}');
+  } else if (url.pathname === '/png') {
+    res.writeHead(500, { ...cors, 'content-type': 'image/png' });
+    res.end(Buffer.from('89504e470d0a1a0a', 'hex'));
+  } else {
+    res.writeHead(404, cors);
+    res.end('nope');
+  }
+});
+await new Promise((r) => server.listen(0, r));
+PORT = server.address().port;
+
+const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bugcast-'));
+// Playwright's bundled Chromium, not `channel: 'chrome'`. The system-Chrome
+// route launches but never registers the MV3 service worker within a sane
+// timeout, and chasing that is not worth a ~150MB download avoided:
+//   bunx playwright install chromium
+// Headed, because the bundled headless shell does not load extensions at all.
+let ctx;
+try {
+  ctx = await chromium.launchPersistentContext(userDataDir, {
+    headless: false,
+    args: [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`],
+  });
+} catch (e) {
+  console.error('Could not launch Chromium. Run `bunx playwright install chromium`.');
+  console.error(String(e.message).split('\n')[0]);
+  server.close();
+  process.exit(1);
+}
+
+let [sw] = ctx.serviceWorkers();
+if (!sw) sw = await ctx.waitForEvent('serviceworker', { timeout: 15000 });
+const extId = new URL(sw.url()).host;
+console.log('extension id:', extId);
+
+// The page under test. Playwright attaches to it, which is the interesting
+// question: does chrome.debugger.attach conflict with an existing CDP client?
+const target = await ctx.newPage();
+await target.goto(`http://localhost:${PORT}/`);
+
+// Grab the id while the target is still the active tab — tab.url is not
+// readable without the `tabs` permission, so URL matching is not an option.
+const tabId = await sw.evaluate(async () => {
+  const [t] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return t?.id ?? null;
+});
+console.log('target tabId:', tabId);
+
+// An extension page is needed to reach onMessage — a service worker's own
+// sendMessage does not loop back to its own listener.
+const ext = await ctx.newPage();
+await ext.goto(`chrome-extension://${extId}/src/popup/index.html`);
+
+const started = await ext.evaluate(
+  ([type, tabId, pageUrl]) => chrome.runtime.sendMessage({ type, tabId, pageUrl }),
+  ['bugcast/start-recording', tabId, `http://localhost:${PORT}/`],
+);
+console.log('start ->', JSON.stringify(started));
+if (started?.error) {
+  console.log('\nATTACH REFUSED (this is the refuse-to-start path working):', started.error);
+  await ctx.close(); server.close(); process.exit(0);
+}
+
+await target.bringToFront();
+await target.evaluate(async (port) => {
+  console.log('[smoke] hello from the page');
+  console.error('Failed to save post');
+  await fetch(`http://localhost:${port}/ok`);
+  await fetch(`http://localhost:${port}/e500`, {
+    method: 'PATCH',
+    headers: { authorization: 'Bearer sk-abcdefghijklmnopqrstuvwxyz012345', 'content-type': 'application/json' },
+    body: JSON.stringify({ blocks: [], cdnCacheEnabled: true, password: 'hunter2' }),
+  }).catch(() => {});
+  await fetch(`http://localhost:${port}/png`).catch(() => {});
+  await fetch(`http://localhost:${port}/nocors`).catch(() => {});
+  await fetch(`http://localhost:${port}/ok?token=deadbeefcafe0123deadbeefcafe0123`).catch(() => {});
+  history.pushState({}, '', '/after-push');
+  setTimeout(() => { throw new Error('boom from the page'); }, 0);
+}, PORT);
+
+await target.waitForTimeout(1500);
+
+const stopped = await ext.evaluate(
+  (type) => chrome.runtime.sendMessage({ type }),
+  'bugcast/stop-recording',
+);
+
+console.log('\n=== redaction summary ===');
+console.log(JSON.stringify(stopped.redaction, null, 2));
+console.log(`\n=== ${stopped.events?.length ?? 0} events ===`);
+for (const e of stopped.events ?? []) {
+  const bits = [String(e.t).padStart(6), e.type.padEnd(10)];
+  if (e.type === 'network') {
+    bits.push(`${e.method} ${e.url.replace(`http://localhost:${PORT}`, '')} -> ${e.status ?? e.failure?.errorText ?? '?'}`);
+    if (e.response?.body) bits.push(`\n         body: ${e.response.body.slice(0, 160)}`);
+    if (e.response?.omitted) bits.push(`[omitted: ${e.response.omitted}]`);
+    if (e.request?.postData) bits.push(`\n         post: ${e.request.postData.slice(0, 160)}`);
+    if (e.request?.headers?.authorization) bits.push(`\n         auth: ${e.request.headers.authorization}`);
+  } else if (e.type === 'console') bits.push(`[${e.level}] ${e.text.slice(0, 120)}`);
+  else if (e.type === 'exception') bits.push(e.text.slice(0, 120));
+  else if (e.type === 'navigation') bits.push(`${e.trigger} ${e.pageUrl}`);
+  console.log(bits.join(' '));
+}
+
+await ctx.close();
+server.close();

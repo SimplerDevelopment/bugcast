@@ -15,7 +15,10 @@ export function App() {
   async function toggle() {
     setError(null);
     const type = recording ? STOP_RECORDING : START_RECORDING;
-    const res = await chrome.runtime.sendMessage({ type });
+    // Read the tab here and pass it along — the active tab can change between
+    // this query and the worker's.
+    const [tab] = recording ? [] : await chrome.tabs.query({ active: true, currentWindow: true });
+    const res = await chrome.runtime.sendMessage({ type, tabId: tab?.id, pageUrl: tab?.url });
     // Attach failure refuses to start rather than degrading — a session missing
     // network and console is indistinguishable, to the agent reading it, from a
     // session where nothing failed. See docs/design/issues/06.

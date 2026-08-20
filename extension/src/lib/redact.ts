@@ -54,11 +54,23 @@ const emptySummary = (): RedactionSummary => ({
 const SENSITIVE_NAME = /auth|token|key|secret|session|password|passwd|pwd|cred|signature|cookie/i;
 
 /** Names that carry secrets without matching the pattern above. */
-const SENSITIVE_EXACT = new Set(['code', 'state', 'sig', 'sid', 'ssn', 'cvv', 'cvc', 'pan']);
+const SENSITIVE_EXACT = new Set(['sig', 'sid', 'ssn', 'cvv', 'cvc', 'pan']);
 
-function isSensitiveName(name: string): boolean {
+/**
+ * Sensitive as URL parameters only.
+ *
+ * OAuth returns `?code=` and `?state=`, so both must go in a URL. As JSON keys
+ * they mean something else entirely and almost never a secret: `code` is an
+ * error code and `state` is React state. Redacting them in a body destroys the
+ * single most diagnostic field an error response has — caught by the smoke
+ * test, which watched `{"code":"DB_ERROR"}` become `{"code":"[redacted]"}`.
+ */
+const SENSITIVE_URL_PARAM = new Set(['code', 'state']);
+
+function isSensitiveName(name: string, context: 'url' | 'any' = 'any'): boolean {
   const n = name.toLowerCase();
-  return SENSITIVE_NAME.test(n) || SENSITIVE_EXACT.has(n);
+  if (SENSITIVE_NAME.test(n) || SENSITIVE_EXACT.has(n)) return true;
+  return context === 'url' && SENSITIVE_URL_PARAM.has(n);
 }
 
 /**
@@ -192,7 +204,7 @@ export class DefaultRedactor implements Redactor {
     }
 
     for (const [key, value] of [...parsed.searchParams]) {
-      if (isSensitiveName(key) || looksSecret(value)) {
+      if (isSensitiveName(key, 'url') || looksSecret(value)) {
         parsed.searchParams.set(key, `[redacted: ${describeValue(value).shape}]`);
         bump(this.counts.urlParamsRedacted, key.toLowerCase());
       }
@@ -202,7 +214,7 @@ export class DefaultRedactor implements Redactor {
       const frag = new URLSearchParams(parsed.hash.slice(1));
       let touched = false;
       for (const [key, value] of [...frag]) {
-        if (isSensitiveName(key) || looksSecret(value)) {
+        if (isSensitiveName(key, 'url') || looksSecret(value)) {
           frag.set(key, `[redacted: ${describeValue(value).shape}]`);
           bump(this.counts.urlParamsRedacted, key.toLowerCase());
           touched = true;

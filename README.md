@@ -82,3 +82,20 @@ Most projects can't answer "why is it built this way" a year later. This one can
 ## License
 
 MIT
+
+## Development
+
+```bash
+cd extension
+bun install
+bun run build      # writes dist/, loadable via chrome://extensions
+bun run test       # unit tests
+bun run typecheck
+bun run smoke      # end-to-end: launches Chromium with the extension loaded
+```
+
+`bun run smoke` needs Playwright's Chromium once: `bunx playwright install chromium`.
+It records a real session against a local server that returns a 500 with a body,
+a binary error, a CORS-blocked request and a URL carrying a token — then prints
+the timeline and the redaction summary. It is the only thing that can tell you
+whether the debugger actually attaches and whether eager body capture works.
