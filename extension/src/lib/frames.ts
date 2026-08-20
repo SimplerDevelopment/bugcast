@@ -54,6 +54,9 @@ export function deservesFrame(event: TimelineEvent): boolean {
     case 'focus':
     case 'navigation':
     case 'exception':
+    // A marker is someone saying "look here" — the single most likely frame to
+    // be wanted in the whole session.
+    case 'marker':
       return true;
     case 'console':
       return event.level === 'error';
@@ -96,8 +99,13 @@ export function planFrames(events: TimelineEvent[]): PlannedFrame[] {
   const essential = plan.filter((frame) =>
     frame.events.some((i) => {
       const e = events[i]!;
-      return e.type === 'navigation' || e.type === 'exception' || e.type === 'network' ||
-        (e.type === 'console' && e.level === 'error');
+      return (
+        e.type === 'marker' ||
+        e.type === 'navigation' ||
+        e.type === 'exception' ||
+        e.type === 'network' ||
+        (e.type === 'console' && e.level === 'error')
+      );
     }),
   );
   return essential.slice(0, MAX_FRAMES);

@@ -10,6 +10,7 @@ import { toSpeechEvents, toSrt, type Segment } from '../lib/srt';
 import { planFrames } from '../lib/frames';
 import type { RedactionSummary } from '../lib/redact';
 import {
+  DROP_MARKER,
   INTERACTION,
   OFFSCREEN_FRAMES,
   OFFSCREEN_START,
@@ -51,18 +52,25 @@ async function handle(msg: any): Promise<Response> {
     case RECORDING_STATE:
       return { ok: true, recording: active !== null };
     case START_RECORDING:
-      return start(msg.tabId, msg.pageUrl, msg.title);
+      return start(msg.tabId, msg.pageUrl, msg.title, msg.video);
     case STOP_RECORDING:
       return stop();
     case INTERACTION:
       recordInteraction(msg);
       return { ok: true, recording: active !== null };
+    case DROP_MARKER:
+      return { ok: true, recording: dropMarker(msg.note || 'Marked') };
     default:
       return { error: `Unknown message: ${msg?.type}` };
   }
 }
 
-async function start(tabId?: number, pageUrl?: string, title?: string): Promise<Response> {
+async function start(
+  tabId?: number,
+  pageUrl?: string,
+  title?: string,
+  wantVideo = true,
+): Promise<Response> {
   if (active) return { ok: true, recording: true };
 
   const tab =
@@ -91,11 +99,13 @@ async function start(tabId?: number, pageUrl?: string, title?: string): Promise<
   // "nothing was on screen". But it is still reported back so the popup can say
   // so at record time, rather than the user finding out at the end.
   let captureError: string | null = null;
-  const capture = await startCapture(tab.id, id).catch((e) => {
-    captureError = String(e?.message ?? e);
-    console.warn('[bugcast] capture unavailable', e);
-    return null;
-  });
+  const capture = !wantVideo
+    ? null
+    : await startCapture(tab.id, id).catch((e) => {
+        captureError = String(e?.message ?? e);
+        console.warn('[bugcast] capture unavailable', e);
+        return null;
+      });
   const redactor = new DefaultRedactor();
   const ctx: CaptureContext = {
     // Sampled inside MediaRecorder.start(), so every source in the artifact
@@ -138,6 +148,7 @@ async function start(tabId?: number, pageUrl?: string, title?: string): Promise<
     id,
     video: Boolean(capture),
   };
+  setBadge(true);
   return { ok: true, recording: true, captureError };
 }
 
@@ -145,6 +156,7 @@ async function stop(): Promise<Response> {
   if (!active) return { ok: true, recording: false };
   const { cdp, events, startedAt, redactor, title, startUrl, id, video } = active;
   active = null;
+  setBadge(false);
   await cdp.detach();
   await unregisterInteractionCapture();
 
@@ -367,6 +379,56 @@ function recordInteraction(msg: any): void {
     ...rest,
   } as TimelineEvent);
   if (rest?.value?.redacted) active.redactor.countWithheldValue();
+}
+
+/**
+ * The toolbar badge is the second recording indicator.
+ *
+ * chrome.debugger's infobar is the first, and it is not something to apologise
+ * for — a tool capturing your microphone and your Authorization headers should
+ * be impossible to forget about. The badge adds the piece the infobar cannot:
+ * which extension, and a way back to Stop.
+ */
+function setBadge(recording: boolean): void {
+  void chrome.action.setBadgeText({ text: recording ? 'REC' : '' });
+  void chrome.action.setBadgeBackgroundColor({ color: '#dc2626' });
+  void chrome.action.setTitle({
+    title: recording ? 'Bugcast — recording. Click to stop.' : 'Bugcast',
+  });
+}
+
+chrome.commands.onCommand.addListener((command) => {
+  if (command === 'drop-marker') {
+    dropMarker('Marked from the keyboard');
+    return;
+  }
+  if (command !== 'toggle-recording') return;
+
+  // Stop always works. Start needs a folder permission that only a click inside
+  // an extension page can re-grant, so when it is not already granted the
+  // honest move is to say so rather than half-start.
+  if (active) void stop();
+  else void start().then((res) => {
+    if ('error' in res) void chrome.action.setBadgeText({ text: '!' });
+  });
+});
+
+/**
+ * Mark the moment.
+ *
+ * The hand-authored example exposed this gap: the narration carried "save is
+ * just broken on this page", which a human reads and a query cannot. A marker
+ * is that same claim, findable.
+ */
+function dropMarker(note: string): boolean {
+  if (!active) return false;
+  active.events.push({
+    type: 'marker',
+    t: toSessionMs(Date.now(), active.ctx.t0),
+    pageUrl: active.ctx.pageUrl,
+    note,
+  });
+  return true;
 }
 
 const OFFSCREEN_URL = 'offscreen.html';

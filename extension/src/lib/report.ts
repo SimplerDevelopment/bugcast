@@ -178,6 +178,8 @@ function renderRow(e: TimelineEvent): string {
       );
     case 'focus':
       return cell('focus', `\`${e.target.selector}\``);
+    case 'marker':
+      return cell('**mark**', `**${e.note}**`);
   }
 }
 

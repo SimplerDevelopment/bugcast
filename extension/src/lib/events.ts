@@ -98,6 +98,18 @@ export interface DragEvent extends BaseEvent {
   to: { target: Target; point: { x: number; y: number } };
 }
 
+/**
+ * A moment the recorder marked by hand.
+ *
+ * Identified as a real gap while hand-authoring the example session: the
+ * narration said "save is just broken on this page", which works for a human
+ * and is invisible to a query. A marker is the same claim, machine-findable.
+ */
+export interface MarkerEvent extends BaseEvent {
+  type: 'marker';
+  note: string;
+}
+
 export interface FocusEvent extends BaseEvent {
   type: 'focus';
   target: Target;
@@ -166,6 +178,7 @@ export type TimelineEvent =
   | SubmitEvent
   | DragEvent
   | FocusEvent
+  | MarkerEvent
   | NetworkEvent
   | ConsoleEvent
   | ExceptionEvent;

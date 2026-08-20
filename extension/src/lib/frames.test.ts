@@ -82,3 +82,18 @@ describe('planFrames', () => {
     expect(plan.some((f) => f.path.includes('network-500'))).toBe(true);
   });
 });
+
+describe('marker', () => {
+  it('always deserves a frame — it is someone saying "look here"', () => {
+    expect(deservesFrame({ type: 'marker', t: 0, pageUrl: '', note: 'This is the bug' })).toBe(true);
+  });
+
+  it('survives the cap, because it is the most likely frame to be wanted', () => {
+    const many: TimelineEvent[] = [];
+    for (let i = 0; i < MAX_FRAMES + 50; i++) many.push(click(i * 1000));
+    many.push({ type: 'marker', t: (MAX_FRAMES + 60) * 1000, pageUrl: '', note: 'here' });
+    const plan = planFrames(many);
+    expect(plan.length).toBeLessThanOrEqual(MAX_FRAMES);
+    expect(plan.some((f) => f.path.includes('marker'))).toBe(true);
+  });
+});

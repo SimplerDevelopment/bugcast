@@ -30,6 +30,20 @@ export default defineManifest({
   optional_host_permissions: ['<all_urls>'],
 
   action: { default_popup: 'src/popup/index.html' },
+
+  // A keyboard shortcut is a user gesture, which is what makes starting from
+  // one possible at all — Chrome grants activeTab for commands exactly as it
+  // does for a toolbar click.
+  commands: {
+    'toggle-recording': {
+      suggested_key: { default: 'Ctrl+Shift+R', mac: 'Command+Shift+R' },
+      description: 'Start or stop recording',
+    },
+    'drop-marker': {
+      suggested_key: { default: 'Ctrl+Shift+M', mac: 'Command+Shift+M' },
+      description: 'Mark this moment ("this is the bug")',
+    },
+  },
   background: { service_worker: 'src/background/service-worker.ts', type: 'module' },
   minimum_chrome_version: '116',
 });

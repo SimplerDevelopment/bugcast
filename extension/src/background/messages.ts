@@ -1,3 +1,4 @@
+export const DROP_MARKER = 'bugcast/drop-marker';
 export const OFFSCREEN_FRAMES = 'bugcast/offscreen-frames';
 export const OFFSCREEN_START = 'bugcast/offscreen-start';
 export const OFFSCREEN_STOP = 'bugcast/offscreen-stop';

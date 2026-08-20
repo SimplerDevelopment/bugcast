@@ -129,3 +129,13 @@ describe('renderReport', () => {
     expect(renderReport(meta, [])).toContain('not redacted');
   });
 });
+
+describe('marker rendering', () => {
+  it('stands out in the timeline, since it is the one row a human placed', () => {
+    const md = renderReport(meta, [
+      { type: 'marker', t: 5000, pageUrl: 'https://x.test/', note: 'This is the bug' },
+    ]);
+    expect(md).toContain('**mark**');
+    expect(md).toContain('**This is the bug**');
+  });
+});
