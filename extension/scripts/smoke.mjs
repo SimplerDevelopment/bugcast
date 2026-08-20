@@ -174,6 +174,20 @@ console.log((stopped.report ?? '(none)').split('\n').slice(0, 40).join('\n'));
 // so drive the real pipeline with a synthetic stream instead: a canvas for
 // video, an oscillator for audio. Proves the worklet loads, the tee wires up,
 // MediaRecorder produces bytes, and PCM comes out the tap.
+// The self-test is reachable from any extension page, so the harness can run
+// the real thing. No folder is chosen here, so `disk` is expected to fail —
+// which is itself worth asserting: the failure has to name what to do.
+console.log('\n=== self-test (cdp + disk only; asr downloads a model) ===');
+const selfTest = await ext.evaluate((type) => chrome.runtime.sendMessage({ type }), 'bugcast/run-self-test');
+for (const c of (selfTest?.checks ?? []).filter((c) => c.id === 'cdp' || c.id === 'disk')) {
+  console.log(`${c.ok ? 'PASS' : 'fail'}  ${c.label} — ${c.detail} (${c.ms}ms)`);
+}
+const cdp = (selfTest?.checks ?? []).find((c) => c.id === 'cdp');
+if (!cdp?.ok) {
+  console.error('FAIL: the debugger self-test could not attach');
+  process.exitCode = 1;
+}
+
 console.log('\n=== pipeline (synthetic stream) ===');
 const off = await ctx.newPage();
 await off.goto(`chrome-extension://${extId}/offscreen.html`);

@@ -7,9 +7,11 @@ import {
   storedSessionDirectory,
 } from '../lib/session-store';
 import { DEFAULT_TIER, MODELS, type ModelTier } from '../offscreen/transcribe';
+import type { CheckResult } from '../lib/self-test';
 import {
   DROP_MARKER,
   RECORDING_STATE,
+  RUN_SELF_TEST,
   START_RECORDING,
   STOP_RECORDING,
 } from '../background/messages';
@@ -40,6 +42,8 @@ export function App() {
   const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [ready, setReady] = useState(false);
+  const [checks, setChecks] = useState<CheckResult[] | null>(null);
+  const [testing, setTesting] = useState(false);
 
   useEffect(() => {
     void (async () => {
@@ -56,10 +60,25 @@ export function App() {
     })();
   }, []);
 
+  const selfTest = useCallback(async () => {
+    setTesting(true);
+    setChecks(null);
+    try {
+      const res = await chrome.runtime.sendMessage({ type: RUN_SELF_TEST });
+      setChecks((res?.checks as CheckResult[]) ?? null);
+    } finally {
+      setTesting(false);
+    }
+  }, []);
+
   const choose = useCallback(async () => {
     setError(null);
     try {
-      setFolder((await pickSessionDirectory()).name);
+      const picked = await pickSessionDirectory();
+      setFolder(picked.name);
+      // Run once, right after setup — the moment the four subsystems can be
+      // proven before anyone trusts a real session to them.
+      void selfTest();
     } catch (e) {
       // An aborted picker is a decision, not a failure.
       if ((e as Error)?.name !== 'AbortError') setError(String((e as Error).message));
@@ -221,6 +240,27 @@ export function App() {
 
       {note && <p className="text-xs text-neutral-600 break-all">{note}</p>}
       {error && <p className="text-xs text-red-600">{error}</p>}
+
+      <div className="border-t border-neutral-200 pt-2">
+        <button
+          onClick={() => void selfTest()}
+          disabled={testing || recording}
+          className="text-xs text-neutral-500 underline hover:text-neutral-900 disabled:no-underline disabled:opacity-50"
+        >
+          {testing ? 'Running self-test…' : 'Run self-test'}
+        </button>
+        {checks && (
+          <ul className="mt-2 space-y-1">
+            {checks.map((c) => (
+              <li key={c.id} className="text-[11px] leading-snug">
+                <span className={c.ok ? 'text-green-700' : 'text-red-600'}>{c.ok ? '✓' : '✗'}</span>{' '}
+                <span className="font-medium">{c.label}</span>{' '}
+                <span className="text-neutral-500">— {c.detail}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
     </Shell>
   );
 }

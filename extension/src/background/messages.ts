@@ -1,3 +1,5 @@
+export const RUN_SELF_TEST = 'bugcast/run-self-test';
+export const OFFSCREEN_SELF_TEST = 'bugcast/offscreen-self-test';
 export const DROP_MARKER = 'bugcast/drop-marker';
 export const OFFSCREEN_FRAMES = 'bugcast/offscreen-frames';
 export const OFFSCREEN_START = 'bugcast/offscreen-start';

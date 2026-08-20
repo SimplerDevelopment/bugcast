@@ -34,6 +34,7 @@ import {
 import {
   OFFSCREEN_ERROR,
   OFFSCREEN_FRAMES,
+  OFFSCREEN_SELF_TEST,
   OFFSCREEN_START,
   OFFSCREEN_STARTED,
   OFFSCREEN_STOP,
@@ -67,6 +68,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     [OFFSCREEN_START]: () => start(msg),
     [OFFSCREEN_STOP]: () => stop(),
     [OFFSCREEN_FRAMES]: () => frames(msg),
+    [OFFSCREEN_SELF_TEST]: () => selfTest(msg.check),
   };
   const run = handlers[msg.type];
   if (!run) return;
@@ -266,6 +268,74 @@ async function frames(msg: { sessionId: string; plan: PlannedFrame[] }): Promise
     await writable.write(await image.arrayBuffer());
     await writable.close();
   });
+}
+
+/**
+ * The two checks that need a DOM.
+ *
+ * `capture` builds the real pipeline from a synthetic stream rather than
+ * tabCapture — the point is to prove the worklet loads, the tee wires up and
+ * MediaRecorder produces bytes, none of which depend on where the pixels came
+ * from, and tabCapture needs an activeTab grant this context does not have.
+ */
+async function selfTest(check: 'capture' | 'asr'): Promise<{ detail: string } | { error: string }> {
+  try {
+    if (check === 'capture') {
+      const canvas = document.createElement('canvas');
+      canvas.width = 160;
+      canvas.height = 120;
+      canvas.getContext('2d')!.fillRect(0, 0, 160, 120);
+
+      const mimeType = pickMimeType((t) => MediaRecorder.isTypeSupported(t));
+      if (!mimeType) throw new Error('No supported WebM profile in this browser');
+
+      const audio = new AudioContext();
+      const dest = audio.createMediaStreamDestination();
+      const osc = audio.createOscillator();
+      osc.connect(dest);
+      osc.start();
+
+      const source = new MediaStream([
+        ...canvas.captureStream(15).getVideoTracks(),
+        ...dest.stream.getAudioTracks(),
+      ]);
+      const { recorder, context, pcm } = await buildPipeline(source, null, mimeType);
+
+      let bytes = 0;
+      recorder.ondataavailable = (e) => (bytes += e.data.size);
+      recorder.start(200);
+      await new Promise((r) => setTimeout(r, 1000));
+      await new Promise<void>((r) => {
+        recorder.onstop = () => r();
+        recorder.stop();
+      });
+      osc.stop();
+      await context.close();
+      await audio.close();
+
+      const samples = pcm.reduce((n, c) => n + c.length, 0);
+      if (!bytes) throw new Error('MediaRecorder produced no data');
+      if (!samples) throw new Error('The audio tap produced no samples');
+      return { detail: `${(bytes / 1024).toFixed(0)}KB video, ${samples} audio samples` };
+    }
+
+    // Model load plus one inference. This is deliberately NOT an accuracy
+    // check: shipping a speech clip to assert known text would be better, and
+    // there is none to ship. What it does prove is the expensive, most
+    // platform-dependent, most silently-failing step — that the model downloads
+    // and inference completes at all. It also reports which backend was chosen
+    // and how long it took, which is the WebGPU-vs-WASM measurement
+    // docs/design/issues/13 deferred to real hardware.
+    const backend = 'gpu' in navigator ? 'webgpu' : 'wasm';
+    const started = performance.now();
+    const silence = new Float32Array(16_000 * 2);
+    await transformersEngine(await storedTier()).transcribe(silence, 0);
+    return {
+      detail: `${backend}, first inference in ${((performance.now() - started) / 1000).toFixed(1)}s`,
+    };
+  } catch (e) {
+    return { error: String((e as Error)?.message ?? e) };
+  }
 }
 
 async function storedTier(): Promise<ModelTier> {

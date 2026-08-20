@@ -8,9 +8,12 @@ import { sessionId, storedSessionDirectory, writeFile } from '../lib/session-sto
 import { renderReport } from '../lib/report';
 import { toSpeechEvents, toSrt, type Segment } from '../lib/srt';
 import { planFrames } from '../lib/frames';
+import { runChecks, type Check } from '../lib/self-test';
 import type { RedactionSummary } from '../lib/redact';
 import {
   DROP_MARKER,
+  OFFSCREEN_SELF_TEST,
+  RUN_SELF_TEST,
   INTERACTION,
   OFFSCREEN_FRAMES,
   OFFSCREEN_START,
@@ -58,6 +61,8 @@ async function handle(msg: any): Promise<Response> {
     case INTERACTION:
       recordInteraction(msg);
       return { ok: true, recording: active !== null };
+    case RUN_SELF_TEST:
+      return { ok: true, recording: active !== null, checks: await selfTest() } as never;
     case DROP_MARKER:
       return { ok: true, recording: dropMarker(msg.note || 'Marked') };
     default:
@@ -498,4 +503,77 @@ async function extractFrames(session: string, plan: unknown[]): Promise<unknown>
 
 async function closeOffscreen(): Promise<void> {
   await chrome.offscreen.closeDocument().catch(() => {});
+}
+
+/**
+ * Four checks, one per subsystem that can fail quietly.
+ *
+ * Ordered cheapest-first so a user waiting on the model download has already
+ * seen the other three resolve.
+ */
+async function selfTest(): Promise<unknown> {
+  const checks: Check[] = [
+    {
+      id: 'cdp',
+      label: 'Debugger',
+      run: async () => {
+        // Its own throwaway tab, not the user's: attaching to whatever they had
+        // open would flash an infobar across their work for no reason.
+        const tab = await chrome.tabs.create({ url: 'about:blank', active: false });
+        try {
+          const session = new CdpSession();
+          await session.attach(tab.id!);
+          await session.detach();
+          return 'attached and detached cleanly';
+        } finally {
+          await chrome.tabs.remove(tab.id!).catch(() => {});
+        }
+      },
+    },
+    {
+      id: 'disk',
+      label: 'Sessions folder',
+      run: async () => {
+        const dir = await storedSessionDirectory();
+        if (!dir) throw new Error('No folder chosen yet');
+        if ((await (dir as any).queryPermission({ mode: 'readwrite' })) !== 'granted') {
+          throw new Error('No write permission — open the popup and press Record once');
+        }
+        // Written and read back, because a handle that reports "granted" can
+        // still fail on a disconnected volume.
+        const probe = `bugcast self-test ${Date.now()}`;
+        await writeFile(dir, '.bugcast-self-test', 'probe.txt', probe);
+        const folder = await dir.getDirectoryHandle('.bugcast-self-test');
+        const text = await (await folder.getFileHandle('probe.txt')).getFile().then((f) => f.text());
+        await dir.removeEntry('.bugcast-self-test', { recursive: true }).catch(() => {});
+        if (text !== probe) throw new Error('Wrote a probe file but read back different contents');
+        return `wrote and read back in ${dir.name}`;
+      },
+    },
+    {
+      id: 'capture',
+      label: 'Tab capture',
+      run: () => offscreenCheck('capture'),
+    },
+    {
+      id: 'asr',
+      label: 'Speech model',
+      run: () => offscreenCheck('asr'),
+    },
+  ];
+
+  const results = await runChecks(checks);
+  await closeOffscreen();
+  return results;
+}
+
+async function offscreenCheck(which: 'capture' | 'asr'): Promise<string> {
+  await ensureOffscreen();
+  const res = await chrome.runtime.sendMessage({
+    target: 'offscreen',
+    type: OFFSCREEN_SELF_TEST,
+    check: which,
+  });
+  if (!res || res.error) throw new Error(res?.error ?? 'No response from the recorder');
+  return res.detail as string;
 }
