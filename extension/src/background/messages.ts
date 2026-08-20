@@ -1,3 +1,4 @@
+export const OFFSCREEN_ZIP = 'bugcast/offscreen-zip';
 export const RUN_SELF_TEST = 'bugcast/run-self-test';
 export const OFFSCREEN_SELF_TEST = 'bugcast/offscreen-self-test';
 export const DROP_MARKER = 'bugcast/drop-marker';
@@ -34,6 +35,7 @@ export type Response =
       sessionId: string;
       /** `folder/session-id`, or null if the write failed. */
       written: string | null;
+      writeError: string | null;
       report: string;
       capture: unknown;
       frames: { written: number; missed: number };

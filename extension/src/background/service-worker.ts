@@ -18,6 +18,7 @@ import {
   OFFSCREEN_FRAMES,
   OFFSCREEN_START,
   OFFSCREEN_STOP,
+  OFFSCREEN_ZIP,
   RECORDING_STATE,
   START_RECORDING,
   STOP_RECORDING,
@@ -182,27 +183,40 @@ async function stop(): Promise<Response> {
 
   // Frames are planned only once the timeline is final, because the plan is a
   // function of the events — including the speech that only just arrived.
+  // Frames are read back out of video.webm, so they need it to be on disk —
+  // which in the zip fallback it never is. No folder means no frame index.
+  const hasFolder = Boolean(await storedSessionDirectory());
   let frames = { written: 0, missed: 0 };
-  if (video) {
+  if (video && hasFolder) {
     const plan = planFrames(events);
     for (const frame of plan) for (const i of frame.events) events[i]!.frame = frame.path;
     frames = ((await extractFrames(id, plan)) as typeof frames) ?? frames;
   }
-  await closeOffscreen();
 
   const redaction = redactor.summary();
   let written: string | null = null;
+  let writeError: string | null = null;
   let report = '';
   try {
     report = renderSessionReport(id, title, startedAt, startUrl, events, redaction);
-    written = await writeSession(id, startedAt, startUrl, events, redaction, report, video, segments, frames.written);
+    const files = sessionFiles(id, startedAt, startUrl, events, redaction, report, video, segments, frames.written);
+    written = hasFolder ? await writeSession(id, files) : await zipSession(id, files);
   } catch (e) {
     // A failed write must not swallow the session — the caller still gets the
     // events, so a folder problem costs a save rather than the recording.
+    // Surfaced, not just logged: a session that recorded fine and then failed
+    // to save is exactly the case where the user needs to know why, right now,
+    // while the state that caused it still exists.
+    writeError = String((e as Error)?.message ?? e);
     console.error('[bugcast] could not write session', e);
+  } finally {
+    // Closed only once everything is out. The zip path reads the buffered
+    // recording from this document's memory, so closing it earlier would
+    // silently drop the video from the artifact.
+    await closeOffscreen();
   }
 
-  return { ok: true, recording: false, events, redaction, sessionId: id, written, report, capture, frames };
+  return { ok: true, recording: false, events, redaction, sessionId: id, written, writeError, report, capture, frames };
 }
 
 function durationOf(events: TimelineEvent[]): number {
@@ -235,7 +249,8 @@ function renderSessionReport(
   );
 }
 
-async function writeSession(
+/** Every text file a session folder contains, as [name, contents]. */
+function sessionFiles(
   id: string,
   startedAt: Date,
   startUrl: string,
@@ -245,20 +260,13 @@ async function writeSession(
   video: boolean,
   segments: Segment[],
   frameCount: number,
-): Promise<string> {
-  const dir = await storedSessionDirectory();
-  if (!dir) throw new Error('No sessions folder has been chosen.');
-
+): Array<[string, string]> {
   const durationMs = durationOf(events);
 
   // Both files carry schemaVersion so either is interpretable alone — which is
   // how an agent will actually read them. Additive changes do not bump it;
   // consumers ignore unknown fields.
-  await writeFile(
-    dir,
-    id,
-    'session.json',
-    JSON.stringify(
+  const manifest = JSON.stringify(
       {
         schemaVersion: SCHEMA_VERSION,
         tool: { name: 'bugcast', version: chrome.runtime.getManifest().version },
@@ -301,22 +309,47 @@ async function writeSession(
           ...(frameCount ? { frames: 'frames/' } : {}),
         },
       },
-      null,
-      2,
-    ),
+    null,
+    2,
   );
 
-  await writeFile(
-    dir,
-    id,
-    'timeline.json',
-    JSON.stringify({ schemaVersion: SCHEMA_VERSION, sessionId: id, t0Epoch: startedAt.getTime(), events }, null, 2),
-  );
+  return [
+    ['session.json', manifest],
+    [
+      'timeline.json',
+      JSON.stringify({ schemaVersion: SCHEMA_VERSION, sessionId: id, t0Epoch: startedAt.getTime(), events }, null, 2),
+    ],
+    ['report.md', report],
+    ...(segments.length ? ([['transcript.srt', toSrt(segments)]] as Array<[string, string]>) : []),
+  ];
+}
 
-  await writeFile(dir, id, 'report.md', report);
-  if (segments.length) await writeFile(dir, id, 'transcript.srt', toSrt(segments));
-
+async function writeSession(id: string, files: Array<[string, string]>): Promise<string> {
+  const dir = await storedSessionDirectory();
+  if (!dir) throw new Error('No sessions folder has been chosen.');
+  for (const [name, contents] of files) await writeFile(dir, id, name, contents);
   return `${dir.name}/${id}`;
+}
+
+/**
+ * Degraded path, for when File System Access is unavailable — which is an
+ * enterprise-policy situation, not user error. Documented as degraded because
+ * it cannot stream and so re-inherits the memory ceiling FSA was chosen to
+ * escape.
+ */
+async function zipSession(id: string, files: Array<[string, string]>): Promise<string> {
+  // Idempotent, so this cannot discard a document already holding the buffered
+  // recording — but it is needed when video was off or capture never started,
+  // in which case no document exists yet.
+  await ensureOffscreen();
+  const res = await chrome.runtime.sendMessage({
+    target: 'offscreen',
+    type: OFFSCREEN_ZIP,
+    sessionId: id,
+    files,
+  });
+  if (!res?.ok) throw new Error(res?.error ?? 'Could not write the session anywhere');
+  return `Downloads/bugcast/${id}.zip`;
 }
 
 const CONTENT_SCRIPT_ID = 'bugcast-interactions';

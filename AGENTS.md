@@ -84,6 +84,11 @@ Every one of these was found the expensive way. Do not rediscover them.
   to load a worklet's module" while a plain `fetch` of the same URL returns 200.
   An extension page needs no `web_accessible_resources` entry to load its own
   files at all.
+- **`chrome.downloads` is not exposed to an offscreen document.** The offscreen
+  document builds the zip and hands back a blob URL; the worker calls
+  `downloads.download`. And the worker must wait for the download to *finish*
+  before closing the document, because closing it revokes the URL the download
+  is reading from.
 - **`chrome.tabCapture.getMediaStreamId` needs an `activeTab` grant** that only a
   real toolbar-icon click produces. Host permissions do not substitute.
 - **transformers.js fetches its ONNX wasm runtime from a CDN** unless
@@ -132,6 +137,7 @@ drive — they need a human, and this is already recorded in
 
 Shipped: #1 clock · #2 CDP capture · #3 redaction · #7 disk output ·
 #4 interactions · #9 artifact assembly · #5 offscreen capture · #6 transcription ·
-#8 frame index · #10 recording UX · #11 self-test · #12 MCP server.
+#8 frame index · #10 recording UX · #11 self-test · #12 MCP server ·
+#14 (closed as a false alarm) · #15 zip fallback.
 
-Open: #13 CI and release · #14 CORS row reads as 200 · #15 zip fallback.
+Open: #13 CI and release.

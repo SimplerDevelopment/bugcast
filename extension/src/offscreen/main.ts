@@ -36,6 +36,7 @@ import {
   OFFSCREEN_FRAMES,
   OFFSCREEN_SELF_TEST,
   OFFSCREEN_START,
+  OFFSCREEN_ZIP,
   OFFSCREEN_STARTED,
   OFFSCREEN_STOP,
 } from '../background/messages';
@@ -46,6 +47,7 @@ interface Live {
   streams: MediaStream[];
   writable: FileSystemWritableFileStream | null;
   /** Kept only when there is nowhere to stream to. */
+  /** Held only when there is nowhere to stream to — see zipSession(). */
   buffered: Blob[];
   pcm: Float32Array[];
   bytes: number;
@@ -62,6 +64,15 @@ let live: Live | null = null;
  */
 export let lastSamples: Float32Array = new Float32Array(0);
 
+/**
+ * The recording, when it could not be streamed to disk.
+ *
+ * Only populated in the fallback path, and this is exactly the memory ceiling
+ * the File System Access API was chosen to escape — so it is held for as short
+ * a time as possible and dropped the moment the zip is built.
+ */
+let lastBuffered: Blob[] = [];
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.target !== 'offscreen') return;
   const handlers: Record<string, () => Promise<unknown>> = {
@@ -69,6 +80,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     [OFFSCREEN_STOP]: () => stop(),
     [OFFSCREEN_FRAMES]: () => frames(msg),
     [OFFSCREEN_SELF_TEST]: () => selfTest(msg.check),
+    [OFFSCREEN_ZIP]: () => zipSession(msg),
   };
   const run = handlers[msg.type];
   if (!run) return;
@@ -336,6 +348,48 @@ async function selfTest(check: 'capture' | 'asr'): Promise<{ detail: string } | 
   } catch (e) {
     return { error: String((e as Error)?.message ?? e) };
   }
+}
+
+/**
+ * The degraded path: one zip through chrome.downloads.
+ *
+ * Exists for enterprise policy, not user error — managed Chrome can disable
+ * File System Access writes outright (DefaultFileSystemWriteGuardSetting),
+ * which without this leaves a corporate user with a completely dead tool.
+ *
+ * One zip rather than two hundred files, because chrome.downloads would
+ * otherwise mean two hundred shelf entries, and its default `uniquify`
+ * collision handling appends " (1)" — silently invalidating every frame path
+ * inside timeline.json.
+ *
+ * It cannot stream, so it re-inherits the memory ceiling FSA avoids. That is
+ * the reason it is documented as degraded rather than as an equal option.
+ */
+async function zipSession(msg: {
+  sessionId: string;
+  files: Array<[name: string, contents: string]>;
+}): Promise<unknown> {
+  const { zipSync, strToU8 } = await import('fflate');
+
+  const entries: Record<string, Uint8Array> = {};
+  for (const [name, contents] of msg.files) entries[name] = strToU8(contents);
+
+  if (lastBuffered.length) {
+    const blob = new Blob(lastBuffered, { type: 'video/webm' });
+    entries['video.webm'] = new Uint8Array(await blob.arrayBuffer());
+    lastBuffered = [];
+  }
+
+  // level 0 for the webm — it is already compressed, and spending CPU to make
+  // it 0.5% smaller is worse than not.
+  const zipped = zipSync(entries, { level: 6 });
+
+  // The URL crosses to the worker rather than the bytes. `chrome.downloads` is
+  // not exposed to an offscreen document at all, and a blob URL is a handle —
+  // sending the zip itself would mean serialising tens of megabytes through a
+  // JSON message channel.
+  const url = URL.createObjectURL(new Blob([zipped], { type: 'application/zip' }));
+  return { ok: true, url, bytes: zipped.byteLength, files: Object.keys(entries).length };
 }
 
 async function storedTier(): Promise<ModelTier> {

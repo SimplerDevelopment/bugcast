@@ -2,7 +2,7 @@
   "name": "bugcast-extension",
   "private": true,
   "version": "0.1.0",
-  "description": "Bugcast \u2014 local-first video QA recorder for Chrome.",
+  "description": "Bugcast — local-first video QA recorder for Chrome.",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
+    "fflate": "^0.8.3",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "zod": "^3.23.8"

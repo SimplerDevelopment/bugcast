@@ -310,9 +310,11 @@ console.log(JSON.stringify(stopped.capture ?? '(none)'));
 
 console.log('\n=== disk ===');
 console.log('sessionId:', stopped.sessionId);
-console.log('written:  ', stopped.written ?? '(no folder chosen — expected in this harness)');
-if (stopped.written === null && !stopped.events?.length) {
-  console.error('FAIL: write failed AND events were lost');
+console.log('written:  ', stopped.written ?? `(nothing written: ${stopped.writeError})`);
+// No folder is chosen here, so this exercises the enterprise-policy fallback:
+// the session must still land somewhere, as a single zip in Downloads.
+if (!stopped.written?.includes('.zip')) {
+  console.error('FAIL: with no folder, the session should fall back to a zip');
   process.exitCode = 1;
 }
 
