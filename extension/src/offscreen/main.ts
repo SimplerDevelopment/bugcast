@@ -127,7 +127,17 @@ async function start(msg: {
   let micError: string | null = null;
   if (msg.withMic) {
     try {
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          // Explicit, not default. Tab audio plays through the speakers while
+          // recording, so without echo cancellation the mic re-records it;
+          // and Whisper is markedly worse on an un-gained, noisy signal.
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+        },
+      });
     } catch (e) {
       // Narration is optional by design: no mic simply means no .srt, and it
       // must not cost the recording. But the reason travels back, because an
@@ -259,23 +269,31 @@ export async function buildPipeline(
   // returns 200. Removing the entry also drops <all_urls> from the manifest.
   await context.audioWorklet.addModule(chrome.runtime.getURL('pcm-worklet.js'));
 
-  const mixed = context.createGain();
-  for (const stream of [tabStream, micStream]) {
-    if (stream && stream.getAudioTracks().length) {
-      context.createMediaStreamSource(stream).connect(mixed);
-    }
+  // The routing matters more than it looks, and getting it wrong is audible.
+  //
+  //   tab ──┬─> recorder        (you want to hear the app in the video)
+  //         └─> speakers        (tabCapture mutes the tab otherwise)
+  //   mic ──┬─> recorder
+  //         └─> Whisper         (mic ONLY — never the speakers)
+  //
+  // Routing the mic to the speakers is a feedback loop, and feeding tab audio
+  // into Whisper asks it to transcribe your narration over the top of whatever
+  // the page is playing. The first version did both.
+  const sink = context.createMediaStreamDestination();
+  const tap = new AudioWorkletNode(context, 'pcm-tap');
+
+  if (tabStream.getAudioTracks().length) {
+    const tab = context.createMediaStreamSource(tabStream);
+    tab.connect(sink);
+    tab.connect(context.destination);
   }
 
-  // Branch 1 — back out to the recorder AND to the speakers. Without the
-  // second connection chrome.tabCapture leaves the tab silent for the whole
-  // session, which is the most obvious possible way to make a QA tool unusable.
-  const sink = context.createMediaStreamDestination();
-  mixed.connect(sink);
-  mixed.connect(context.destination);
-
-  // Branch 2 — the Whisper tap.
-  const tap = new AudioWorkletNode(context, 'pcm-tap');
-  mixed.connect(tap);
+  if (micStream?.getAudioTracks().length) {
+    const mic = context.createMediaStreamSource(micStream);
+    mic.connect(sink);
+    // The transcript is the narration. Nothing else reaches the model.
+    mic.connect(tap);
+  }
   const pcm: Float32Array[] = [];
   tap.port.onmessage = (e) => pcm.push(e.data as Float32Array);
 

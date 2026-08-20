@@ -45,12 +45,19 @@ export const DEVICE = 'wasm';
  * with "Missing required scale ... TransposeDQWeightsForMatMulNBits", which
  * reads like a corrupt download and is a dtype mismatch.
  *
- * Verified on a real machine: `fp32`, `q4`, and this all load and infer. This
- * one is chosen because it is roughly a sixth of the download of `fp32`
- * (~45MB against ~290MB for base.en), and a first-run download is the most
- * expensive thing this tool asks of anyone.
+ * The encoder stays at full precision and only the decoder is quantised. The
+ * encoder is what turns audio into features, so degrading it degrades every
+ * word that follows — it is the wrong place to save bytes. `{encoder q8,
+ * decoder q4}` was the first choice, purely on download size, and transcription
+ * quality was reported as poor.
+ *
+ * The **q8 decoder** is separately broken — not a uniform q8 config, as first
+ * assumed. Any config using `decoder_model_merged: 'q8'` fails session creation
+ * with "Missing required scale ... TransposeDQWeightsForMatMulNBits", which
+ * reads like a corrupt download and is a dtype mismatch. Verified working on
+ * real hardware: all-`fp32`, all-`q4`, `{q8, q4}` and this.
  */
-export const DTYPE = { encoder_model: 'q8', decoder_model_merged: 'q4' };
+export const DTYPE = { encoder_model: 'fp32', decoder_model_merged: 'q4' };
 
 /** Below this there is no speech worth a model download. */
 export const MIN_SAMPLES = 16_000; // one second
