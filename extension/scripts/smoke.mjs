@@ -62,6 +62,15 @@ const server = http.createServer((req, res) => {
 await new Promise((r) => server.listen(0, r));
 PORT = server.address().port;
 
+// A genuinely different origin. Same-origin /nocors is not a CORS test at all —
+// it just succeeds, which is what made the first attempt at this look broken.
+const other = http.createServer((req, res) => {
+  res.writeHead(200, { 'content-type': 'application/json' }); // no ACAO
+  res.end('{"secret":"should never be captured"}');
+});
+await new Promise((r) => other.listen(0, r));
+const OTHER_PORT = other.address().port;
+
 // Test-only affordance, labelled deliberately: production requests host
 // permission per-origin at record time, but that prompt is a native Chrome
 // dialog no automation can accept. The code under test is byte-identical —
@@ -141,6 +150,7 @@ await target.dragAndDrop('#palette', '#canvas');
 await target.click('[data-testid="editor-save"]');
 await target.waitForTimeout(300);
 
+await target.evaluate((p) => ((window).__otherPort = p), OTHER_PORT);
 await target.evaluate(async (port) => {
   console.log('[smoke] hello from the page');
   console.error('Failed to save post');
@@ -152,6 +162,8 @@ await target.evaluate(async (port) => {
   }).catch(() => {});
   await fetch(`http://localhost:${port}/png`).catch(() => {});
   await fetch(`http://localhost:${port}/nocors`).catch(() => {});
+  // Cross-origin, no ACAO — this one is really blocked.
+  await fetch(`http://127.0.0.1:${window.__otherPort}/blocked`).catch(() => {});
   await fetch(`http://localhost:${port}/ok?token=deadbeefcafe0123deadbeefcafe0123`).catch(() => {});
   history.pushState({}, '', '/after-push');
   setTimeout(() => { throw new Error('boom from the page'); }, 0);
@@ -304,13 +316,25 @@ if (stopped.written === null && !stopped.events?.length) {
   process.exitCode = 1;
 }
 
+// A cross-origin request with no ACAO must be recorded as a failure carrying
+// the CORS reason. Recorded naively it reads as a clean success, which is not
+// merely incomplete but the opposite of what the developer saw.
+const cors = (stopped.events ?? []).find((e) => e.type === 'network' && e.url.includes('/blocked'));
+console.log('\n=== cors ===');
+console.log(cors?.failure ? `blocked: ${cors.failure.errorText} / ${cors.failure.corsErrorStatus}` : 'NOT RECORDED AS A FAILURE');
+if (!cors?.failure?.corsErrorStatus) {
+  console.error('FAIL: a CORS-blocked request was not recorded as a failure');
+  process.exitCode = 1;
+}
+
 console.log('\n=== redaction summary ===');
 console.log(JSON.stringify(stopped.redaction, null, 2));
 console.log(`\n=== ${stopped.events?.length ?? 0} events ===`);
 for (const e of stopped.events ?? []) {
   const bits = [String(e.t).padStart(6), e.type.padEnd(10)];
   if (e.type === 'network') {
-    bits.push(`${e.method} ${e.url.replace(`http://localhost:${PORT}`, '')} -> ${e.status ?? e.failure?.errorText ?? '?'}`);
+    bits.push(`${e.method} ${e.url.replace(`http://localhost:${PORT}`, '')} -> ${e.status ?? '?'}`);
+    if (e.failure) bits.push(`[FAILED: ${e.failure.errorText}${e.failure.corsErrorStatus ? ' / ' + e.failure.corsErrorStatus : ''}]`);
     if (e.response?.body) bits.push(`\n         body: ${e.response.body.slice(0, 160)}`);
     if (e.response?.omitted) bits.push(`[omitted: ${e.response.omitted}]`);
     if (e.request?.postData) bits.push(`\n         post: ${e.request.postData.slice(0, 160)}`);
@@ -331,3 +355,4 @@ for (const e of stopped.events ?? []) {
 
 await ctx.close();
 server.close();
+other.close();
