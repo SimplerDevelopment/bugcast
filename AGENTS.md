@@ -86,6 +86,10 @@ Every one of these was found the expensive way. Do not rediscover them.
   files at all.
 - **`chrome.tabCapture.getMediaStreamId` needs an `activeTab` grant** that only a
   real toolbar-icon click produces. Host permissions do not substitute.
+- **transformers.js fetches its ONNX wasm runtime from a CDN** unless
+  `env.backends.onnx.wasm.wasmPaths` points at local files — a network call in
+  the middle of a tool whose premise is that it runs locally. `scripts/copy-ort.mjs`
+  copies the two runtimes actually used; copying all of them is 94MB.
 
 ## `bun run smoke` is not optional
 
@@ -125,7 +129,7 @@ drive — they need a human, and this is already recorded in
 ## Status
 
 Shipped: #1 clock · #2 CDP capture · #3 redaction · #7 disk output ·
-#4 interactions · #9 artifact assembly · #5 offscreen capture.
+#4 interactions · #9 artifact assembly · #5 offscreen capture · #6 transcription.
 
-Open: #6 transcription · #8 frame index · #10 recording UX · #11 self-test · #12 MCP server ·
+Open: #8 frame index · #10 recording UX · #11 self-test · #12 MCP server ·
 #13 CI and release · #14 CORS row reads as 200 · #15 zip fallback.

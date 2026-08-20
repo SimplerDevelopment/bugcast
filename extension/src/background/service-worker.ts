@@ -6,6 +6,7 @@ import { DefaultRedactor } from '../lib/redact';
 import { SCHEMA_VERSION } from '../lib/events';
 import { sessionId, storedSessionDirectory, writeFile } from '../lib/session-store';
 import { renderReport } from '../lib/report';
+import { toSpeechEvents, toSrt, type Segment } from '../lib/srt';
 import type { RedactionSummary } from '../lib/redact';
 import {
   INTERACTION,
@@ -149,13 +150,23 @@ async function stop(): Promise<Response> {
   // arrive interleaved and slightly out of order.
   events.sort((a, b) => a.t - b.t);
 
-  const capture = await stopCapture();
+  const capture = (await stopCapture()) as { segments?: Segment[] } | null;
+
+  // Speech joins the same flat array as everything else, then the whole thing
+  // sorts once. The ordering is the information: narration lands *before* the
+  // click it describes, because people narrate intent before acting.
+  const segments = capture?.segments ?? [];
+  if (segments.length) {
+    events.push(...toSpeechEvents(segments, startUrl));
+    events.sort((a, b) => a.t - b.t);
+  }
+
   const redaction = redactor.summary();
   let written: string | null = null;
   let report = '';
   try {
     report = renderSessionReport(id, title, startedAt, startUrl, events, redaction);
-    written = await writeSession(id, startedAt, startUrl, events, redaction, report, video);
+    written = await writeSession(id, startedAt, startUrl, events, redaction, report, video, segments);
   } catch (e) {
     // A failed write must not swallow the session — the caller still gets the
     // events, so a folder problem costs a save rather than the recording.
@@ -203,6 +214,7 @@ async function writeSession(
   redaction: unknown,
   report: string,
   video: boolean,
+  segments: Segment[],
 ): Promise<string> {
   const dir = await storedSessionDirectory();
   if (!dir) throw new Error('No sessions folder has been chosen.');
@@ -237,7 +249,9 @@ async function writeSession(
           video: video
             ? { enabled: true, file: 'video.webm', frameRate: 15, codec: 'vp8/opus' }
             : { enabled: false },
-          transcript: { enabled: false },
+          transcript: segments.length
+            ? { enabled: true, file: 'transcript.srt', segments: segments.length }
+            : { enabled: false },
           frames: { enabled: false },
         },
         redaction: {
@@ -251,6 +265,7 @@ async function writeSession(
           timeline: 'timeline.json',
           report: 'report.md',
           ...(video ? { video: 'video.webm' } : {}),
+          ...(segments.length ? { transcript: 'transcript.srt' } : {}),
         },
       },
       null,
@@ -266,6 +281,7 @@ async function writeSession(
   );
 
   await writeFile(dir, id, 'report.md', report);
+  if (segments.length) await writeFile(dir, id, 'transcript.srt', toSrt(segments));
 
   return `${dir.name}/${id}`;
 }

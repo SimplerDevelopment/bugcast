@@ -21,6 +21,8 @@
  */
 
 import { idbGet } from '../lib/idb';
+import { cleanSegments } from '../lib/srt';
+import { DEFAULT_TIER, transformersEngine, type ModelTier } from './transcribe';
 import {
   CHUNK_MS,
   pickMimeType,
@@ -118,6 +120,10 @@ async function start(msg: {
   // so on a static page frame 0 can be seconds stale — never anchor on it.
   state.recorder.start(CHUNK_MS);
   const t0 = Date.now();
+  // The tap has been live since it was connected, a few milliseconds before
+  // this. Dropping what it collected makes the audio buffer start at t0 exactly
+  // — cheaper and more honest than carrying an offset nobody can verify.
+  state.pcm.length = 0;
 
   live = state;
   return { type: OFFSCREEN_STARTED, t0, mimeType, withMic: Boolean(micStream) };
@@ -149,11 +155,26 @@ async function stop(): Promise<unknown> {
 
   lastSamples = samples;
 
+  // Post-hoc, not streaming: ten minutes transcribes in under a minute either
+  // way, so a streaming pipeline would be complexity bought for nothing.
+  let segments: ReturnType<typeof cleanSegments> = [];
+  let transcriptError: string | null = null;
+  try {
+    const tier = await storedTier();
+    segments = cleanSegments(await transformersEngine(tier).transcribe(samples, 0));
+  } catch (e) {
+    // No speech means no .srt, and a transcription failure must not cost the
+    // session — every other artifact is already complete by this point.
+    transcriptError = String((e as Error)?.message ?? e);
+  }
+
   return {
     ok: true,
     bytes: state.bytes,
     pcmSamples: total,
     videoWritten: state.writable !== null,
+    segments,
+    transcriptError,
   };
 }
 
@@ -208,6 +229,11 @@ export async function buildPipeline(
   ]);
 
   return { recorder: new MediaRecorder(composed, recorderOptions(mimeType)), context, pcm };
+}
+
+async function storedTier(): Promise<ModelTier> {
+  const stored = await chrome.storage.local.get('modelTier');
+  return (stored?.modelTier as ModelTier) ?? DEFAULT_TIER;
 }
 
 async function openSessionStream(session: string): Promise<FileSystemWritableFileStream> {
