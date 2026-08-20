@@ -111,7 +111,12 @@ async function load(tier: ModelTier, dtype: unknown = DTYPE): Promise<any> {
   // and NOT as part of a bare `vite build`, so a hand-run build silently ships
   // an extension whose transcription cannot start.
   await assertRuntimePresent();
-  env.allowLocalModels = true;
+  // No local models are bundled, so leaving this on makes transformers.js probe
+  // /models/... for seven files first and log a "Failed to fetch" for each —
+  // seven alarming console errors on a path that was always going to fall
+  // through to the download. The offline story is a documented manual step, not
+  // this default.
+  env.allowLocalModels = false;
   // The one documented exception to zero-network: the model itself downloads
   // once and caches forever. An offline path is loading it from disk instead.
   env.allowRemoteModels = true;

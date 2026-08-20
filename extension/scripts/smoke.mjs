@@ -71,12 +71,17 @@ const other = http.createServer((req, res) => {
 await new Promise((r) => other.listen(0, r));
 const OTHER_PORT = other.address().port;
 
-// Test-only affordance, labelled deliberately: production requests host
-// permission per-origin at record time, but that prompt is a native Chrome
-// dialog no automation can accept. The code under test is byte-identical —
-// only the manifest differs, and only in the one thing that cannot be granted
-// headlessly. dist/ is a build artifact, regenerated on every run.
-const manifestPath = path.join(EXT, 'manifest.json');
+// Test-only affordance: production requests host permission per-origin at
+// record time, but that prompt is a native Chrome dialog no automation can
+// accept. The code under test is byte-identical — only the manifest differs,
+// and only in the one thing that cannot be granted headlessly.
+//
+// Applied to a COPY. An earlier version patched dist/manifest.json in place and
+// never put it back, so the shipped build quietly carried <all_urls> and Chrome
+// warned about it on load. A test must not be able to change the artifact.
+const LOADED = fs.mkdtempSync(path.join(os.tmpdir(), 'bugcast-ext-'));
+fs.cpSync(EXT, LOADED, { recursive: true });
+const manifestPath = path.join(LOADED, 'manifest.json');
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 manifest.host_permissions = ['<all_urls>'];
 fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
@@ -91,7 +96,7 @@ let ctx;
 try {
   ctx = await chromium.launchPersistentContext(userDataDir, {
     headless: false,
-    args: [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`],
+      args: [`--disable-extensions-except=${LOADED}`, `--load-extension=${LOADED}`],
   });
 } catch (e) {
   console.error('Could not launch Chromium. Run `bunx playwright install chromium`.');

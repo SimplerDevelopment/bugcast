@@ -24,23 +24,6 @@
     </p>
     <div id="status">Requesting…</div>
 
-    <script>
-      const status = document.getElementById('status');
-      navigator.mediaDevices
-        .getUserMedia({ audio: true })
-        .then((stream) => {
-          // The grant is what matters, not the stream — the offscreen document
-          // opens its own once the permission exists.
-          for (const track of stream.getTracks()) track.stop();
-          status.textContent = 'Microphone enabled. You can close this tab and start recording.';
-          status.className = 'ok';
-        })
-        .catch((e) => {
-          status.textContent =
-            `Not enabled (${e.name}). Without it a session still records video, network and ` +
-            `console — there is simply no transcript.`;
-          status.className = 'no';
-        });
-    </script>
+    <script src="./mic.js"></script>
   </body>
 </html>
