@@ -24,7 +24,7 @@ import { idbGet } from '../lib/idb';
 import { cleanSegments } from '../lib/srt';
 import type { PlannedFrame } from '../lib/frames';
 import { extractFrames } from './frames';
-import { DEFAULT_TIER, transformersEngine, type ModelTier } from './transcribe';
+import { DEFAULT_TIER, DEVICE, transformersEngine, type ModelTier } from './transcribe';
 import {
   CHUNK_MS,
   pickMimeType,
@@ -73,13 +73,16 @@ export let lastSamples: Float32Array = new Float32Array(0);
  */
 let lastBuffered: Blob[] = [];
 
+/** Set at start, because it cannot be read from here. */
+let tier: ModelTier = DEFAULT_TIER;
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.target !== 'offscreen') return;
   const handlers: Record<string, () => Promise<unknown>> = {
     [OFFSCREEN_START]: () => start(msg),
     [OFFSCREEN_STOP]: () => stop(),
     [OFFSCREEN_FRAMES]: () => frames(msg),
-    [OFFSCREEN_SELF_TEST]: () => selfTest(msg.check),
+    [OFFSCREEN_SELF_TEST]: () => selfTest(msg.check, msg.tier ?? DEFAULT_TIER),
     [OFFSCREEN_ZIP]: () => zipSession(msg),
   };
   const run = handlers[msg.type];
@@ -93,6 +96,16 @@ async function start(msg: {
   streamId: string;
   sessionId: string;
   withMic: boolean;
+  /**
+   * Passed in, never read here.
+   *
+   * `chrome.storage` is NOT available inside a real offscreen document, and the
+   * failure is `Cannot read properties of undefined (reading 'local')` — which
+   * names nothing useful. Note that a *tab* navigated to offscreen.html does
+   * have chrome.storage, so probing one to check the other says the opposite of
+   * the truth. Same reason the popup passes tabId and pageUrl to the worker.
+   */
+  tier: ModelTier;
 }): Promise<unknown> {
   if (live) return { error: 'Already recording.' };
 
@@ -149,6 +162,7 @@ async function start(msg: {
   state.pcm.length = 0;
 
   live = state;
+  tier = msg.tier ?? DEFAULT_TIER;
   return { type: OFFSCREEN_STARTED, t0, mimeType, withMic: Boolean(micStream) };
 }
 
@@ -183,7 +197,6 @@ async function stop(): Promise<unknown> {
   let segments: ReturnType<typeof cleanSegments> = [];
   let transcriptError: string | null = null;
   try {
-    const tier = await storedTier();
     segments = cleanSegments(await transformersEngine(tier).transcribe(samples, 0));
   } catch (e) {
     // No speech means no .srt, and a transcription failure must not cost the
@@ -290,7 +303,10 @@ async function frames(msg: { sessionId: string; plan: PlannedFrame[] }): Promise
  * MediaRecorder produces bytes, none of which depend on where the pixels came
  * from, and tabCapture needs an activeTab grant this context does not have.
  */
-async function selfTest(check: 'capture' | 'asr'): Promise<{ detail: string } | { error: string }> {
+async function selfTest(
+  check: 'capture' | 'asr',
+  tier: ModelTier,
+): Promise<{ detail: string } | { error: string }> {
   try {
     if (check === 'capture') {
       const canvas = document.createElement('canvas');
@@ -349,12 +365,11 @@ async function selfTest(check: 'capture' | 'asr'): Promise<{ detail: string } | 
     // and inference completes at all. It also reports which backend was chosen
     // and how long it took, which is the WebGPU-vs-WASM measurement
     // docs/design/issues/13 deferred to real hardware.
-    const backend = 'gpu' in navigator ? 'webgpu' : 'wasm';
     const started = performance.now();
     const silence = new Float32Array(16_000 * 2);
-    await transformersEngine(await storedTier()).transcribe(silence, 0);
+    await transformersEngine(tier).transcribe(silence, 0);
     return {
-      detail: `${backend}, first inference in ${((performance.now() - started) / 1000).toFixed(1)}s`,
+      detail: `${DEVICE}, first run (model download + inference) in ${((performance.now() - started) / 1000).toFixed(1)}s`,
     };
   } catch (e) {
     return { error: String((e as Error)?.message ?? e) };
@@ -401,11 +416,6 @@ async function zipSession(msg: {
   // JSON message channel.
   const url = URL.createObjectURL(new Blob([zipped], { type: 'application/zip' }));
   return { ok: true, url, bytes: zipped.byteLength, files: Object.keys(entries).length };
-}
-
-async function storedTier(): Promise<ModelTier> {
-  const stored = await chrome.storage.local.get('modelTier');
-  return (stored?.modelTier as ModelTier) ?? DEFAULT_TIER;
 }
 
 async function openSessionStream(session: string): Promise<FileSystemWritableFileStream> {

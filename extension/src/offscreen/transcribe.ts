@@ -33,6 +33,13 @@ export const MODELS: Record<ModelTier, string> = {
 export const DEFAULT_TIER: ModelTier = 'base.en';
 
 /**
+ * The backend actually used. Exported so nothing can report a different one —
+ * the self-test previously derived its own label from `'gpu' in navigator` and
+ * cheerfully printed "webgpu" for a WASM run.
+ */
+export const DEVICE = 'wasm';
+
+/**
  * Per-module, because Whisper's encoder and decoder do not quantize the same
  * way — and a uniform `q8` is specifically broken: it fails at session creation
  * with "Missing required scale ... TransposeDQWeightsForMatMulNBits", which
@@ -94,7 +101,7 @@ async function load(tier: ModelTier, dtype: unknown = DTYPE): Promise<any> {
   // If a real measurement ever favours WebGPU, both halves change together:
   // this line and scripts/copy-ort.mjs.
   return pipeline('automatic-speech-recognition', MODELS[tier], {
-    device: 'wasm' as never,
+    device: DEVICE as never,
     dtype: dtype as never,
   });
 }

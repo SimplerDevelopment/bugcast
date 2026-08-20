@@ -495,6 +495,12 @@ async function ensureOffscreen(): Promise<void> {
   });
 }
 
+/** Read here, because the offscreen document has no chrome.storage. */
+async function storedTier(): Promise<string> {
+  const stored = await chrome.storage.local.get('modelTier');
+  return (stored?.modelTier as string) ?? 'base.en';
+}
+
 async function startCapture(tabId: number, session: string): Promise<{ t0: number } | null> {
   await ensureOffscreen();
 
@@ -519,6 +525,7 @@ async function startCapture(tabId: number, session: string): Promise<{ t0: numbe
     // Optional, default on. No speech simply means no .srt; it must never cost
     // the recording.
     withMic: true,
+    tier: await storedTier(),
   });
   if (!res || res.error) throw new Error(res?.error ?? 'Capture failed to start');
   return { t0: res.t0 };
@@ -614,6 +621,7 @@ async function offscreenCheck(which: 'capture' | 'asr'): Promise<string> {
     target: 'offscreen',
     type: OFFSCREEN_SELF_TEST,
     check: which,
+    tier: await storedTier(),
   });
   if (!res || res.error) throw new Error(res?.error ?? 'No response from the recorder');
   return res.detail as string;
