@@ -523,6 +523,33 @@ function dropMarker(note: string): boolean {
 const OFFSCREEN_URL = 'offscreen.html';
 
 /**
+ * Keep the service worker alive across a long offscreen operation.
+ *
+ * MV3 terminates an idle worker after about 30 seconds, and awaiting a
+ * `sendMessage` response does not reliably count as activity. When the worker
+ * dies the channel dies with it, and the caller sees "A listener indicated an
+ * asynchronous response by returning true, but the message channel closed
+ * before a response was received" — which describes the symptom and names
+ * nothing.
+ *
+ * It matters most for the two operations that legitimately take minutes: the
+ * first model download, and transcribing a long session at stop. Losing a
+ * transcript to a worker timeout would be indistinguishable from a bug in the
+ * transcription itself.
+ *
+ * Any extension API call resets the idle timer; getPlatformInfo is the cheapest
+ * one with no side effects.
+ */
+async function whileAlive<T>(work: () => Promise<T>): Promise<T> {
+  const ping = setInterval(() => void chrome.runtime.getPlatformInfo(), 20_000);
+  try {
+    return await work();
+  } finally {
+    clearInterval(ping);
+  }
+}
+
+/**
  * The offscreen document is created lazily and torn down after each session.
  *
  * Chrome allows exactly one per extension, and a stale one from a crashed
@@ -583,16 +610,21 @@ async function stopCapture(): Promise<unknown> {
   // Deliberately does NOT close the document — frame extraction still needs a
   // <video>, a canvas and requestVideoFrameCallback, none of which exist in a
   // service worker. closeOffscreen() runs once everything is out.
-  return chrome.runtime
-    .sendMessage({ target: 'offscreen', type: OFFSCREEN_STOP })
-    .catch(() => null);
+  //
+  // Wrapped, because this is where transcription happens: on a long session it
+  // is minutes of work behind a single message.
+  return whileAlive(() =>
+    chrome.runtime.sendMessage({ target: 'offscreen', type: OFFSCREEN_STOP }).catch(() => null),
+  );
 }
 
 async function extractFrames(session: string, plan: unknown[]): Promise<unknown> {
   if (!plan.length) return { written: 0, missed: 0 };
-  return chrome.runtime
-    .sendMessage({ target: 'offscreen', type: OFFSCREEN_FRAMES, sessionId: session, plan })
-    .catch(() => ({ written: 0, missed: plan.length }));
+  return whileAlive(() =>
+    chrome.runtime
+      .sendMessage({ target: 'offscreen', type: OFFSCREEN_FRAMES, sessionId: session, plan })
+      .catch(() => ({ written: 0, missed: plan.length })),
+  );
 }
 
 async function closeOffscreen(): Promise<void> {
@@ -674,12 +706,15 @@ async function selfTest(only?: string[]): Promise<unknown> {
 
 async function offscreenCheck(which: 'capture' | 'mic' | 'asr'): Promise<string> {
   await ensureOffscreen();
-  const res = await chrome.runtime.sendMessage({
-    target: 'offscreen',
-    type: OFFSCREEN_SELF_TEST,
-    check: which,
-    tier: await storedTier(),
-  });
+  const tier = await storedTier();
+  const res = await whileAlive(() =>
+    chrome.runtime.sendMessage({
+      target: 'offscreen',
+      type: OFFSCREEN_SELF_TEST,
+      check: which,
+      tier,
+    }),
+  );
   if (!res || res.error) throw new Error(res?.error ?? 'No response from the recorder');
   return res.detail as string;
 }

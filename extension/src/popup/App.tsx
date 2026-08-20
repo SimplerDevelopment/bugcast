@@ -27,10 +27,13 @@ function originOf(url: string | undefined): string | null {
   }
 }
 
+// Sizes are the full-precision encoder plus the quantised decoder that actually
+// ships — see DTYPE. They went up when the encoder stopped being quantised,
+// which is the trade that fixed transcription quality.
 const TIER_LABELS: Record<ModelTier, string> = {
-  'tiny.en': 'Tiny — fastest, roughest (~20 MB)',
-  'base.en': 'Base — recommended (~45 MB)',
-  'small.en': 'Small — most accurate, slowest (~130 MB)',
+  'tiny.en': 'Tiny — fastest, roughest (~45 MB)',
+  'base.en': 'Base — recommended (~105 MB)',
+  'small.en': 'Small — most accurate, slowest (~340 MB)',
 };
 
 export function App() {
@@ -243,8 +246,8 @@ export function App() {
         </label>
         <p className="text-[11px] leading-snug text-neutral-500">
           The speech model downloads once, the first time you record with a microphone, and is
-          cached after that. To stay fully offline, place the model files in the folder yourself —
-          see the README.
+          cached after that. The first run can take a couple of minutes on a slow connection —
+          nothing is wrong if it sits there.
         </p>
         {error && <p className="text-xs text-red-600">{error}</p>}
       </Shell>
