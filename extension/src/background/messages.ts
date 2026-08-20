@@ -15,5 +15,13 @@ export interface StartMessage {
 
 export type Response =
   | { ok: true; recording: boolean }
-  | { ok: true; recording: false; events: unknown[]; redaction: unknown }
+  | {
+      ok: true;
+      recording: false;
+      events: unknown[];
+      redaction: unknown;
+      sessionId: string;
+      /** `folder/session-id`, or null if the write failed. */
+      written: string | null;
+    }
   | { error: string };

@@ -125,6 +125,17 @@ const stopped = await ext.evaluate(
   'bugcast/stop-recording',
 );
 
+// The directory grant cannot be scripted — showDirectoryPicker opens a native
+// OS dialog. So this asserts the *degradation*: with no folder chosen, the
+// session must still come back rather than being lost to a write failure.
+console.log('\n=== disk ===');
+console.log('sessionId:', stopped.sessionId);
+console.log('written:  ', stopped.written ?? '(no folder chosen — expected in this harness)');
+if (stopped.written === null && !stopped.events?.length) {
+  console.error('FAIL: write failed AND events were lost');
+  process.exitCode = 1;
+}
+
 console.log('\n=== redaction summary ===');
 console.log(JSON.stringify(stopped.redaction, null, 2));
 console.log(`\n=== ${stopped.events?.length ?? 0} events ===`);
