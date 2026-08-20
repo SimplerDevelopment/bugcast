@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.local
+.DS_Store
+
+# spike output — the scripts are re-runnable, the artifacts are not worth keeping
+*.webm
+*.png
+starts.json

@@ -1,0 +1,28 @@
+import { defineManifest } from '@crxjs/vite-plugin';
+import pkg from '../package.json';
+
+export default defineManifest({
+  manifest_version: 3,
+  name: 'Bugcast — Video QA Recorder',
+  version: pkg.version,
+  description:
+    'Record a QA session — video, narrated audio transcribed to SRT, and a correlated timeline of clicks, console logs and failed network calls — as raw files you own.',
+
+  // Deliberately NOT `<all_urls>`, and no declared content_scripts.
+  // The interaction listener is injected programmatically at record time
+  // (activeTab), then registerContentScripts covers document_start for the
+  // rest of the session and unregisters on stop. See docs/design/issues/05.
+  permissions: [
+    'debugger', // the only mechanism that sees network below JS. issues/02, /06
+    'tabCapture', // video + tab audio. issues/08
+    'offscreen', // MediaRecorder and Whisper need a DOM context. issues/07
+    'scripting', // programmatic injection at record time. issues/05
+    'activeTab',
+    'storage',
+    'downloads', // zip fallback when File System Access is blocked. issues/10
+  ],
+
+  action: { default_popup: 'src/popup/index.html' },
+  background: { service_worker: 'src/background/service-worker.ts', type: 'module' },
+  minimum_chrome_version: '116',
+});
