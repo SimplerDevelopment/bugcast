@@ -2,7 +2,7 @@ import { CdpSession } from '../lib/cdp';
 import { NetworkCapture, type CaptureContext } from '../lib/cdp-network';
 import { PageCapture } from '../lib/cdp-page';
 import type { TimelineEvent } from '../lib/events';
-import { NO_REDACTION } from '../lib/redact';
+import { DefaultRedactor } from '../lib/redact';
 import { RECORDING_STATE, START_RECORDING, STOP_RECORDING, type Response } from './messages';
 
 interface Recording {
@@ -53,9 +53,9 @@ async function start(): Promise<Response> {
     t0: Date.now(),
     pageUrl: tab.url ?? '',
     emit: (event) => events.push(event),
-    // #3 replaces this. Named so it is greppable and so nothing ships
-    // un-redacted by omission rather than by decision.
-    redactor: NO_REDACTION,
+    // Runs in memory, before anything is serialized — the raw value never
+    // reaches disk. See lib/redact.ts.
+    redactor: new DefaultRedactor(),
   };
 
   new NetworkCapture(cdp, ctx).start();
@@ -73,7 +73,7 @@ async function start(): Promise<Response> {
 
 async function stop(): Promise<Response> {
   if (!active) return { ok: true, recording: false };
-  const { cdp, events } = active;
+  const { cdp, ctx, events } = active;
   active = null;
   await cdp.detach();
 
@@ -82,5 +82,6 @@ async function stop(): Promise<Response> {
   events.sort((a, b) => a.t - b.t);
   // ponytail: disk output is #7, artifact assembly is #9.
   console.log(`[bugcast] captured ${events.length} events`, events);
+  console.log('[bugcast] redaction', ctx.redactor.summary());
   return { ok: true, recording: false };
 }
