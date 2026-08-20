@@ -53,8 +53,18 @@ const emptySummary = (): RedactionSummary => ({
 /** Matches header names, query parameter names, and JSON keys alike. */
 const SENSITIVE_NAME = /auth|token|key|secret|session|password|passwd|pwd|cred|signature|cookie/i;
 
-/** Names that carry secrets without matching the pattern above. */
-const SENSITIVE_EXACT = new Set(['sig', 'sid', 'ssn', 'cvv', 'cvc', 'pan']);
+/**
+ * Names that carry secrets without matching the pattern above.
+ *
+ * Exact match, not substring, so `pin` does not drag in `pinned`. `pw` earned
+ * its place the hard way: the smoke test submitted a GET form and
+ * `?pw=hunter2hunter2` sailed through untouched, into both the network row and
+ * the navigation event, because the pattern only knew `password` and `pwd`.
+ */
+const SENSITIVE_EXACT = new Set([
+  'sig', 'sid', 'ssn', 'cvv', 'cvc', 'pan',
+  'pw', 'pass', 'otp', 'pin', 'mfa', 'totp',
+]);
 
 /**
  * Sensitive as URL parameters only.

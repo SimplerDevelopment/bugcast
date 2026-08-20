@@ -5,7 +5,14 @@ import type { TimelineEvent } from '../lib/events';
 import { DefaultRedactor } from '../lib/redact';
 import { SCHEMA_VERSION } from '../lib/events';
 import { sessionId, storedSessionDirectory, writeFile } from '../lib/session-store';
-import { RECORDING_STATE, START_RECORDING, STOP_RECORDING, type Response } from './messages';
+import {
+  INTERACTION,
+  RECORDING_STATE,
+  START_RECORDING,
+  STOP_RECORDING,
+  type Response,
+} from './messages';
+import { toSessionMs } from '../lib/time';
 
 interface Recording {
   cdp: CdpSession;
@@ -30,6 +37,9 @@ async function handle(msg: any): Promise<Response> {
       return start(msg.tabId, msg.pageUrl);
     case STOP_RECORDING:
       return stop();
+    case INTERACTION:
+      recordInteraction(msg);
+      return { ok: true, recording: active !== null };
     default:
       return { error: `Unknown message: ${msg?.type}` };
   }
@@ -72,6 +82,7 @@ async function start(tabId?: number, pageUrl?: string): Promise<Response> {
 
   new NetworkCapture(cdp, ctx).start();
   new PageCapture(cdp, ctx).start();
+  await injectInteractionCapture(tab.id);
 
   // Recording almost always starts on an already-loaded page, so
   // Page.frameNavigated never fires for it and the timeline would never say
@@ -94,6 +105,7 @@ async function stop(): Promise<Response> {
   const startUrl = active.ctx.pageUrl;
   active = null;
   await cdp.detach();
+  await unregisterInteractionCapture();
 
   // Sorted once, at the end — the flat timeline is the contract, and sources
   // arrive interleaved and slightly out of order.
@@ -176,4 +188,71 @@ async function writeSession(
   );
 
   return `${dir.name}/${id}`;
+}
+
+const CONTENT_SCRIPT_ID = 'bugcast-interactions';
+
+/**
+ * Two injections, because they cover different moments.
+ *
+ * `executeScript` reaches the page that is already open — but it cannot run at
+ * `document_start` there, so on that first page a listener the page registered
+ * during its own bootstrap could in principle win the capture phase. Rare, and
+ * it costs clicks rather than the session.
+ *
+ * `registerContentScripts` covers everything the session navigates to
+ * afterwards, at `document_start`, where registration order is ours.
+ */
+async function injectInteractionCapture(tabId: number): Promise<void> {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      files: ['content.js'],
+    });
+  } catch (e) {
+    // A restricted page (chrome://, the Web Store) refuses injection. Network
+    // and console still work, so this is a reduced session rather than none.
+    console.warn('[bugcast] interaction capture unavailable on this page', e);
+  }
+
+  try {
+    await chrome.scripting.registerContentScripts([
+      {
+        id: CONTENT_SCRIPT_ID,
+        js: ['content.js'],
+        matches: ['<all_urls>'],
+        runAt: 'document_start',
+        allFrames: true,
+        persistAcrossSessions: false,
+      },
+    ]);
+  } catch (e) {
+    // Needs host permission, which the popup requests per-origin. Without it
+    // the current page is still captured; later navigations are not.
+    console.warn('[bugcast] interaction capture will not survive navigation', e);
+  }
+}
+
+async function unregisterInteractionCapture(): Promise<void> {
+  await chrome.scripting.unregisterContentScripts({ ids: [CONTENT_SCRIPT_ID] }).catch(() => {});
+}
+
+/**
+ * Content scripts report wall-clock, since they have no idea what t0 is. Both
+ * sides are epoch-ms on the same machine, so the conversion is exact.
+ */
+function recordInteraction(msg: any): void {
+  if (!active) return;
+  // `type` must be destructured away too — otherwise ...rest carries the
+  // message type and overwrites the event kind it is spread after.
+  const { type: _messageType, kind, epochMs, startedAt, ...rest } = msg;
+  const t = toSessionMs(epochMs, active.ctx.t0);
+  active.events.push({
+    type: kind,
+    t: startedAt ? toSessionMs(startedAt, active.ctx.t0) : t,
+    ...(startedAt ? { tEnd: t } : {}),
+    pageUrl: active.ctx.pageUrl,
+    ...rest,
+  } as TimelineEvent);
+  if (rest?.value?.redacted) active.redactor.countWithheldValue();
 }

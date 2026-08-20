@@ -1,3 +1,4 @@
+export const INTERACTION = 'bugcast/interaction';
 export const START_RECORDING = 'bugcast/start-recording';
 export const STOP_RECORDING = 'bugcast/stop-recording';
 export const RECORDING_STATE = 'bugcast/recording-state';

@@ -22,6 +22,13 @@ export default defineManifest({
     'downloads', // zip fallback when File System Access is blocked. issues/10
   ],
 
+  // Requested per-origin at record time rather than granted up front. This is
+  // a better privacy story than a blanket manifest grant *and* it is required:
+  // `activeTab` covers executeScript on the current page but cannot back
+  // registerContentScripts, which is what keeps interaction capture alive
+  // across navigations during a session.
+  optional_host_permissions: ['<all_urls>'],
+
   action: { default_popup: 'src/popup/index.html' },
   background: { service_worker: 'src/background/service-worker.ts', type: 'module' },
   minimum_chrome_version: '116',

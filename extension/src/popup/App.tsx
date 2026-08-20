@@ -8,6 +8,17 @@ import {
 } from '../lib/session-store';
 import { RECORDING_STATE, START_RECORDING, STOP_RECORDING } from '../background/messages';
 
+/** `https://app.example.com/*`, or null for a page that cannot be recorded. */
+function originOf(url: string | undefined): string | null {
+  if (!url) return null;
+  try {
+    const { protocol, host } = new URL(url);
+    return protocol === 'http:' || protocol === 'https:' ? `${protocol}//${host}/*` : null;
+  } catch {
+    return null;
+  }
+}
+
 export function App() {
   const [recording, setRecording] = useState(false);
   const [folder, setFolder] = useState<string | null>(null);
@@ -55,6 +66,15 @@ export function App() {
       if ((await permissionState(handle)) !== 'granted' && !(await requestPermission(handle))) {
         setError('Bugcast needs write access to that folder to save the session.');
         return;
+      }
+
+      // Per-origin host permission, requested here because it needs a user
+      // gesture. It is what lets interaction capture survive a navigation —
+      // activeTab alone cannot back registerContentScripts.
+      const [current] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const origin = originOf(current?.url);
+      if (origin && !(await chrome.permissions.contains({ origins: [origin] }))) {
+        await chrome.permissions.request({ origins: [origin] }).catch(() => false);
       }
 
       // Read the tab here and pass it along — the active tab can change between

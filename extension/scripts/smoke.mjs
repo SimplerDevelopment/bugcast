@@ -28,7 +28,20 @@ const server = http.createServer((req, res) => {
   const cors = { 'Access-Control-Allow-Origin': '*' };
   if (url.pathname === '/') {
     res.writeHead(200, { 'content-type': 'text/html' });
-    res.end('<!doctype html><title>bugcast smoke</title><h1>smoke</h1>');
+    res.end(`<!doctype html><title>bugcast smoke</title>
+      <main>
+        <form id="editor">
+          <label for="quote">Quote</label>
+          <textarea id="quote" data-testid="block-quote"></textarea>
+          <input type="password" name="pw" autocomplete="current-password">
+          <input type="text" name="notes">
+          <select name="status"><option>draft</option><option>published</option></select>
+          <label><input type="checkbox" name="pinned"> Pin it</label>
+          <button type="submit" data-testid="editor-save">Save changes</button>
+        </form>
+        <div id="palette" draggable="true" style="width:80px;height:40px">Testimonial</div>
+        <div id="canvas" style="width:300px;height:200px">Canvas</div>
+      </main>`);
   } else if (url.pathname === '/ok') {
     res.writeHead(200, { ...cors, 'content-type': 'application/json' });
     res.end('{"ok":true}');
@@ -48,6 +61,16 @@ const server = http.createServer((req, res) => {
 });
 await new Promise((r) => server.listen(0, r));
 PORT = server.address().port;
+
+// Test-only affordance, labelled deliberately: production requests host
+// permission per-origin at record time, but that prompt is a native Chrome
+// dialog no automation can accept. The code under test is byte-identical —
+// only the manifest differs, and only in the one thing that cannot be granted
+// headlessly. dist/ is a build artifact, regenerated on every run.
+const manifestPath = path.join(EXT, 'manifest.json');
+const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+manifest.host_permissions = ['<all_urls>'];
+fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
 
 const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bugcast-'));
 // Playwright's bundled Chromium, not `channel: 'chrome'`. The system-Chrome
@@ -102,6 +125,21 @@ if (started?.error) {
 }
 
 await target.bringToFront();
+
+// Interactions, driven as real trusted input so the capture-phase listeners
+// see exactly what a user would produce.
+await target.click('[data-testid="block-quote"]');
+await target.fill('[data-testid="block-quote"]', 'Great service, would recommend');
+await target.fill('input[name="pw"]', 'hunter2hunter2');
+await target.fill('input[name="notes"]', 'dan@example.com');
+await target.selectOption('select[name="status"]', 'published');
+await target.check('input[name="pinned"]');
+await target.keyboard.press('Escape');
+await target.keyboard.press('Tab');
+await target.dragAndDrop('#palette', '#canvas');
+await target.click('[data-testid="editor-save"]');
+await target.waitForTimeout(300);
+
 await target.evaluate(async (port) => {
   console.log('[smoke] hello from the page');
   console.error('Failed to save post');
@@ -148,6 +186,14 @@ for (const e of stopped.events ?? []) {
     if (e.request?.postData) bits.push(`\n         post: ${e.request.postData.slice(0, 160)}`);
     if (e.request?.headers?.authorization) bits.push(`\n         auth: ${e.request.headers.authorization}`);
   } else if (e.type === 'console') bits.push(`[${e.level}] ${e.text.slice(0, 120)}`);
+  else if (e.type === 'drag') {
+    bits.push(`${e.from?.target?.selector} -> ${e.to?.target?.selector} (${e.mechanism})`);
+  } else if (e.target) {
+    bits.push(e.target.selector);
+    if (e.value) bits.push(`value=${JSON.stringify(e.value)}`);
+    if (e.key) bits.push(`key=${e.key}`);
+    if (e.mechanism) bits.push(`(${e.mechanism}) -> ${e.to?.target?.selector}`);
+  }
   else if (e.type === 'exception') bits.push(e.text.slice(0, 120));
   else if (e.type === 'navigation') bits.push(`${e.trigger} ${e.pageUrl}`);
   console.log(bits.join(' '));
