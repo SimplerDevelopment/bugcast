@@ -73,6 +73,25 @@ export function chunksToSegments(
   }));
 }
 
+/** The runtime files scripts/copy-ort.mjs is responsible for placing. */
+const RUNTIME_FILES = ['ort-wasm-simd-threaded.wasm', 'ort-wasm-simd-threaded.asyncify.mjs'];
+
+async function assertRuntimePresent(): Promise<void> {
+  const missing: string[] = [];
+  for (const file of RUNTIME_FILES) {
+    const ok = await fetch(chrome.runtime.getURL(`ort/${file}`))
+      .then((r) => r.ok)
+      .catch(() => false);
+    if (!ok) missing.push(file);
+  }
+  if (missing.length) {
+    throw new Error(
+      `Speech runtime missing from this build (${missing.join(', ')}). ` +
+        'Rebuild with `bun run build` — a bare `vite build` skips the step that copies it.',
+    );
+  }
+}
+
 let cached: Promise<any> | null = null;
 
 async function load(tier: ModelTier, dtype: unknown = DTYPE): Promise<any> {
@@ -84,6 +103,14 @@ async function load(tier: ModelTier, dtype: unknown = DTYPE): Promise<any> {
   const wasm = env.backends?.onnx?.wasm;
   if (!wasm) throw new Error('transformers.js exposed no wasm backend to point at local binaries');
   wasm.wasmPaths = chrome.runtime.getURL('ort/');
+
+  // Checked before use, because the failure otherwise is
+  // "Failed to fetch dynamically imported module ... asyncify.mjs" — which
+  // reads like a network problem and is a missing build step. dist/ort/ is
+  // populated by scripts/copy-ort.mjs, which runs as part of `bun run build`
+  // and NOT as part of a bare `vite build`, so a hand-run build silently ships
+  // an extension whose transcription cannot start.
+  await assertRuntimePresent();
   env.allowLocalModels = true;
   // The one documented exception to zero-network: the model itself downloads
   // once and caches forever. An offline path is loading it from disk instead.

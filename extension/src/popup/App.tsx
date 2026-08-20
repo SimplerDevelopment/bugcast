@@ -43,6 +43,9 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [ready, setReady] = useState(false);
   const [checks, setChecks] = useState<CheckResult[] | null>(null);
+  const [last, setLast] = useState<{
+    id: string; written: string | null; writeError: string | null; events: number; frames: number;
+  } | null>(null);
   const [testing, setTesting] = useState(false);
 
   useEffect(() => {
@@ -50,12 +53,14 @@ export function App() {
       const [state, handle, stored] = await Promise.all([
         chrome.runtime.sendMessage({ type: RECORDING_STATE }).catch(() => null),
         storedSessionDirectory(),
-        chrome.storage.local.get(['modelTier', 'video']),
+        chrome.storage.local.get(['modelTier', 'video', 'lastSession']),
       ]);
       setRecording(Boolean(state?.recording));
       setFolder(handle?.name ?? null);
       setTier((stored?.modelTier as ModelTier) ?? DEFAULT_TIER);
       setVideo(stored?.video !== false);
+      setLast(stored?.lastSession ?? null);
+      setLast(stored?.lastSession ?? null);
       setReady(true);
     })();
   }, []);
@@ -109,7 +114,17 @@ export function App() {
         const res = await chrome.runtime.sendMessage({ type: STOP_RECORDING });
         setRecording(false);
         if (res?.error) setError(res.error);
+        // A failed write returns `written: null` AND a writeError. Showing only
+        // the success case is how a lost session looks like nothing happening.
+        else if (res?.writeError) setError(`Could not save: ${res.writeError}`);
         else if (res?.written) setNote(`Saved to ${res.written}`);
+        setLast({
+          id: res?.sessionId,
+          written: res?.written ?? null,
+          writeError: res?.writeError ?? null,
+          events: res?.events?.length ?? 0,
+          frames: res?.frames?.written ?? 0,
+        });
         return;
       }
 
@@ -240,6 +255,21 @@ export function App() {
 
       {note && <p className="text-xs text-neutral-600 break-all">{note}</p>}
       {error && <p className="text-xs text-red-600">{error}</p>}
+
+      {last && !recording && (
+        <div className="rounded bg-neutral-50 p-2 text-[11px] leading-snug">
+          <div className="font-medium text-neutral-700">Last session</div>
+          <div className="break-all text-neutral-500">{last.id}</div>
+          <div className="text-neutral-500">
+            {last.events} events{last.frames ? `, ${last.frames} frames` : ''}
+          </div>
+          {last.written ? (
+            <div className="break-all text-green-700">→ {last.written}</div>
+          ) : (
+            <div className="text-red-600">Not saved: {last.writeError ?? 'unknown error'}</div>
+          )}
+        </div>
+      )}
 
       <div className="border-t border-neutral-200 pt-2">
         <button
