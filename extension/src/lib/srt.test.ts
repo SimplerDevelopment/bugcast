@@ -3,6 +3,7 @@ import {
   cleanSegments,
   isLikelyHallucination,
   mergeSegments,
+  pageUrlResolver,
   srtTime,
   toSpeechEvents,
   toSrt,
@@ -52,6 +53,55 @@ describe('toSpeechEvents', () => {
     expect(events).toEqual([
       { type: 'speech', t: 1180, tEnd: 4020, pageUrl: 'https://x.test/', text: 'hello' },
     ]);
+  });
+
+  it('asks per segment when given a resolver, so a navigating session is not collapsed', () => {
+    const at = pageUrlResolver(
+      [
+        { t: 0, pageUrl: 'https://x.test/board' },
+        { t: 5000, pageUrl: 'https://x.test/board/card-1' },
+      ],
+      'https://x.test/board',
+    );
+    const events = toSpeechEvents([seg(1000, 1800, 'on the board'), seg(6000, 6800, 'in the card')], at);
+    expect(events.map((e) => e.pageUrl)).toEqual([
+      'https://x.test/board',
+      'https://x.test/board/card-1',
+    ]);
+  });
+});
+
+describe('pageUrlResolver', () => {
+  const NAVS = [
+    { t: 0, pageUrl: 'https://x.test/a' },
+    { t: 5000, pageUrl: 'https://x.test/b' },
+    { t: 9000, pageUrl: 'https://x.test/c' },
+  ];
+
+  it('returns the navigation in effect, treating the boundary as the new page', () => {
+    const at = pageUrlResolver(NAVS, 'https://fallback.test/');
+    expect(at(4999)).toBe('https://x.test/a');
+    expect(at(5000)).toBe('https://x.test/b');
+    expect(at(99000)).toBe('https://x.test/c');
+  });
+
+  it('falls back only for speech that predates every navigation', () => {
+    const at = pageUrlResolver(NAVS.slice(1), 'https://fallback.test/');
+    expect(at(10)).toBe('https://fallback.test/');
+    expect(at(5000)).toBe('https://x.test/b');
+  });
+
+  it('sorts and ignores navigations with no url rather than trusting input order', () => {
+    const at = pageUrlResolver(
+      [NAVS[2]!, { t: 3000, pageUrl: '' }, NAVS[0]!, NAVS[1]!],
+      'https://fallback.test/',
+    );
+    expect(at(3500)).toBe('https://x.test/a');
+    expect(at(9500)).toBe('https://x.test/c');
+  });
+
+  it('uses the fallback when there are no navigations at all', () => {
+    expect(pageUrlResolver([], 'https://fallback.test/')(1234)).toBe('https://fallback.test/');
   });
 });
 

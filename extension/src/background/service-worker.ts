@@ -6,7 +6,7 @@ import { DefaultRedactor } from '../lib/redact';
 import { SCHEMA_VERSION } from '../lib/events';
 import { sessionId, storedSessionDirectory, writeFile } from '../lib/session-store';
 import { renderReport } from '../lib/report';
-import { toSpeechEvents, toSrt, type Segment } from '../lib/srt';
+import { pageUrlResolver, toSpeechEvents, toSrt, type Segment } from '../lib/srt';
 import { planFrames } from '../lib/frames';
 import { runChecks, type Check } from '../lib/self-test';
 import { loadSettings } from '../lib/settings';
@@ -280,7 +280,18 @@ async function stop(): Promise<Response> {
     // live solely in speech.ndjson, which stays an append-only log of what was
     // known at the time. These are merged in purely so report.md can interleave
     // them; timeline.json filters them back out.
-    events.push(...toSpeechEvents(segments, startUrl));
+    // Resolved per segment, not stamped with startUrl: a session that navigates
+    // would otherwise file every word spoken after the first navigation under
+    // the page it opened on.
+    events.push(
+      ...toSpeechEvents(
+        segments,
+        pageUrlResolver(
+          events.filter((e) => e.type === 'navigation') as Array<{ t: number; pageUrl: string }>,
+          startUrl,
+        ),
+      ),
+    );
     events.sort((a, b) => a.t - b.t);
   }
 

@@ -50,16 +50,57 @@ export function toSrt(segments: Segment[]): string {
   );
 }
 
-export function toSpeechEvents(segments: Segment[], pageUrl: string): SpeechEvent[] {
+/**
+ * Where a segment was spoken: one page for the whole session, or asked per
+ * segment. A session that navigates needs the latter — see `pageUrlResolver`.
+ */
+export type PageAt = string | ((t: number) => string);
+
+export function toSpeechEvents(segments: Segment[], pageUrl: PageAt): SpeechEvent[] {
+  const at = typeof pageUrl === 'function' ? pageUrl : () => pageUrl;
   return segments
     .filter((s) => s.text.trim())
     .map((s) => ({
       type: 'speech',
       t: Math.round(s.start),
       tEnd: Math.round(s.end),
-      pageUrl,
+      pageUrl: at(Math.round(s.start)),
       text: s.text.trim(),
     }));
+}
+
+/**
+ * The page in effect at a moment, from the navigations already in the timeline.
+ *
+ * Narration was stamped with the session's `startUrl`, which is right only until
+ * the first navigation — everything said after it was filed under the page the
+ * session opened on. `ctx.pageUrl` is no better here: at stop time it holds the
+ * LAST page, which is the mirror-image mistake.
+ *
+ * Navigations are a step function over `t`, so the page at an utterance is a
+ * lookup. `fallback` covers speech transcribed from before the first navigation
+ * was recorded, where the session's opening url really is the best answer.
+ */
+export function pageUrlResolver(
+  navigations: ReadonlyArray<{ t: number; pageUrl: string }>,
+  fallback: string,
+): (t: number) => string {
+  const steps = navigations.filter((n) => n.pageUrl).sort((a, b) => a.t - b.t);
+  return (t) => {
+    let lo = 0;
+    let hi = steps.length - 1;
+    let found = fallback;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (steps[mid]!.t <= t) {
+        found = steps[mid]!.pageUrl;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return found;
+  };
 }
 
 /**
