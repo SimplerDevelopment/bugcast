@@ -176,6 +176,34 @@ await target.keyboard.press('Escape');
 await target.keyboard.press('Tab');
 await target.dragAndDrop('#palette', '#canvas');
 await target.click('[data-testid="editor-save"]');
+
+// How long does a click take to reach disk? This is the number the whole
+// debounce exists to keep small.
+const clickAt = Date.now();
+let latency = null;
+for (let i = 0; i < 40; i++) {
+  const seen = await ext.evaluate(async () => {
+    const opfs = await navigator.storage.getDirectory();
+    const dir = await opfs.getDirectoryHandle('sessions').catch(() => null);
+    if (!dir) return 0;
+    for await (const [, handle] of dir.entries()) {
+      if (handle.kind !== 'directory') continue;
+      const f = await handle.getFileHandle('events.ndjson').catch(() => null);
+      if (!f) continue;
+      const text = await (await f.getFile()).text();
+      return text.split('\n').filter((l) => l.includes('editor-save')).length;
+    }
+    return 0;
+  });
+  if (seen >= 2) { latency = Date.now() - clickAt; break; }
+  await target.waitForTimeout(25);
+}
+console.log(`\n=== event latency to disk ===\n  ${latency ?? '>1000'} ms`);
+if (latency === null || latency > 1000) {
+  console.error('FAIL: an event took over a second to reach disk');
+  process.exitCode = 1;
+}
+
 await target.waitForTimeout(300);
 
 await target.evaluate((p) => ((window).__otherPort = p), OTHER_PORT);

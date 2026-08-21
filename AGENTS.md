@@ -77,6 +77,10 @@ Every one of these was found the expensive way. Do not rediscover them.
 - **Text content is not an accessible name for a form control** — a `<select>`'s
   is every option concatenated. And a container's "name" identifies the whole
   page, so text selectors are leaf-only.
+- **Appending is cheap and does NOT get more expensive as the file grows** —
+  measured at 8-35ms whether the file is 2KB or 680KB (`scripts/flush-probe.mjs`).
+  Chrome is not copying the file on each open, so do not batch writes to "save"
+  anything; events debounce at 150ms and reach disk in under 100ms.
 - **`createWritable()` only commits on `close()`.** It writes to a temporary
   swap file, so a writable held open across a session leaves an *empty file on
   disk* until stop — the opposite of streaming. For anything meant to be read

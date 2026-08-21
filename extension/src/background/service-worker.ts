@@ -127,12 +127,22 @@ async function start(
 
   const events: TimelineEvent[] = [];
   const startedAt = new Date();
+  /**
+   * Capture starts a moment before `active` exists, so early events have
+   * nowhere to queue yet. They are held here and handed over once it does.
+   *
+   * Deliberately NOT by aliasing this array as the stream's pending queue,
+   * which is what the first version did: `flushStream` replaces `pending` with
+   * a fresh array, so the closure kept pushing into the detached original and
+   * everything after the first flush vanished — the stream held half the
+   * session, which the disk smoke caught by comparing counts.
+   */
+  const beforeActive: string[] = [];
   const record = (event: TimelineEvent): void => {
-    // Before `active` exists — only the synthetic initial navigation.
     events.push(event);
-    pendingBeforeActive.push(JSON.stringify(event));
+    if (active) queueLine(event.type === 'speech' ? 'speech' : 'events', JSON.stringify(event));
+    else beforeActive.push(JSON.stringify(event));
   };
-  const pendingBeforeActive: string[] = [];
   const id = sessionId(startedAt, pageUrl ?? tab.url ?? '');
 
   // Capture starts before the clock does, because t0 belongs to
@@ -161,7 +171,7 @@ async function start(
     // only read tab.url when activeTab has been granted by a user gesture, and
     // relying on that would make page context silently empty in other flows.
     pageUrl: pageUrl ?? tab.url ?? '',
-    emit: (event) => recordEvent(event, events, pendingBeforeActive),
+    emit: record,
     // Runs in memory, before anything is serialized — the raw value never
     // reaches disk. See lib/redact.ts.
     redactor,
@@ -194,16 +204,13 @@ async function start(
     ctx,
     events,
     streams: {
-      events: { ...streams.events, pending: pendingBeforeActive },
+      events: { ...streams.events, pending: [...beforeActive] },
       speech: streams.speech,
     },
     writes: Promise.resolve(),
-    // Batched every couple of seconds rather than written per event. Not a
-    // micro-optimisation: the File System Access grant lapsing has been the
-    // largest real source of failure here, and per-event writes would multiply
-    // operations against exactly that permission by orders of magnitude. Two
-    // seconds is nothing against the cadence of someone narrating.
-    flushTimer: setInterval(() => flushEvents(), FLUSH_MS) as unknown as number,
+    // No shared interval: each stream schedules its own flush when something
+    // is queued, so events do not wait on a tick that has not come round yet.
+    flushTimer: 0,
     startedAt,
     redactor,
     title: title || tab.title || tab.url || 'Session',
@@ -877,10 +884,20 @@ async function offscreenCheck(which: 'capture' | 'mic' | 'asr'): Promise<string>
   return (res as any).detail as string;
 }
 
-/** How often queued events reach disk. */
-const FLUSH_MS = 2_000;
-
 type StreamName = 'events' | 'speech';
+
+/**
+ * How long a stream waits before writing what it has.
+ *
+ * Measured rather than guessed: one append costs 8-35ms and, importantly, does
+ * **not** grow with file size — Chrome is not copying the file on each open, so
+ * the original two-second batching was buying nothing. Events therefore write
+ * essentially as they happen, coalescing only a burst.
+ *
+ * Speech stays slow on purpose. It arrives in bursts from ten-second windows,
+ * so a short debounce would add wakeups without making anything fresher.
+ */
+const DEBOUNCE_MS: Record<StreamName, number> = { events: 150, speech: 2_000 };
 
 interface Stream {
   file: FileSystemFileHandle | null;
@@ -888,10 +905,12 @@ interface Stream {
   bytes: number;
   pending: string[];
   writes: Promise<void>;
+  /** Set while a flush is scheduled; the debounce coalesces a burst. */
+  timer: number | null;
 }
 
 async function openStream(session: string, name: string): Promise<Stream> {
-  const empty: Stream = { file: null, bytes: 0, pending: [], writes: Promise.resolve() };
+  const empty: Stream = { file: null, bytes: 0, pending: [], writes: Promise.resolve(), timer: null };
   try {
     const dir = await storedSessionDirectory();
     if (!dir) return empty;
@@ -908,6 +927,24 @@ async function openStream(session: string, name: string): Promise<Stream> {
 }
 
 /**
+ * Queue a line and schedule its stream's flush.
+ *
+ * Per-stream rather than one shared timer, so a burst of narration cannot delay
+ * an event reaching disk — which is the other half of the contention that
+ * prompted splitting the outputs.
+ */
+function queueLine(name: StreamName, line: string): void {
+  const stream = active?.streams[name];
+  if (!stream) return;
+  stream.pending.push(line);
+  if (stream.timer !== null) return;
+  stream.timer = setTimeout(() => {
+    stream.timer = null;
+    void flushStream(stream);
+  }, DEBOUNCE_MS[name]) as unknown as number;
+}
+
+/**
  * Append whatever has accumulated, to both streams.
  *
  * Serialised per stream through a promise chain: concurrent writes on one
@@ -921,7 +958,14 @@ function flushEvents(): Promise<void> {
   const session = active;
   if (!session) return Promise.resolve();
   return Promise.all(
-    (Object.keys(session.streams) as StreamName[]).map((name) => flushStream(session.streams[name])),
+    (Object.keys(session.streams) as StreamName[]).map((name) => {
+      const stream = session.streams[name];
+      if (stream.timer !== null) {
+        clearTimeout(stream.timer);
+        stream.timer = null;
+      }
+      return flushStream(stream);
+    }),
   ).then(() => {});
 }
 
@@ -960,6 +1004,7 @@ function recordEvent(event: TimelineEvent, events?: TimelineEvent[], pending?: s
 
   // Narration goes to its own stream. Both carry `t` from the same origin, so a
   // consumer that wants them interleaved merges on it.
-  const queue = pending ?? active?.streams[event.type === 'speech' ? 'speech' : 'events'].pending;
-  queue?.push(JSON.stringify(event));
+  const line = JSON.stringify(event);
+  if (pending) pending.push(line);
+  else queueLine(event.type === 'speech' ? 'speech' : 'events', line);
 }
