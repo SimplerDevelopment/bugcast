@@ -60,6 +60,19 @@ No terminal, no compiler, no sidecar process. That's deliberate — see
 [the design notes](docs/design/issues/03-local-transcription-real-costs.md) for
 why the obvious `whisper.cpp` approach doesn't work.
 
+## Settings
+
+Right-click the icon → **Options**, or the **Settings** link in the popup.
+
+| | |
+|---|---|
+| **Recording** | Video on/off; transcribe-while-recording on/off (it costs CPU alongside the app you're testing) |
+| **Microphone** | Which input device, and the one-time permission grant |
+| **Transcription** | Model tier — bigger is more accurate and a larger one-time download |
+| **Privacy** | Whether typed values are captured. Off by default. |
+| **Sessions** | Where sessions are written |
+| **Shortcuts** | What actually bound, and how to change it |
+
 ## Hand a session to a coding agent
 
 Point it at `report.md` and you're done — that's the whole handoff, and it needs

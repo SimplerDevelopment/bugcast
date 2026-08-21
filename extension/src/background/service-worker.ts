@@ -9,6 +9,7 @@ import { renderReport } from '../lib/report';
 import { toSpeechEvents, toSrt, type Segment } from '../lib/srt';
 import { planFrames } from '../lib/frames';
 import { runChecks, type Check } from '../lib/self-test';
+import { loadSettings } from '../lib/settings';
 import type { RedactionSummary } from '../lib/redact';
 import {
   DROP_MARKER,
@@ -137,7 +138,8 @@ async function start(
   // "nothing was on screen". But it is still reported back so the popup can say
   // so at record time, rather than the user finding out at the end.
   let captureError: string | null = null;
-  const capture = !wantVideo
+  const wantsVideo = wantVideo && (await loadSettings()).video;
+  const capture = !wantsVideo
     ? null
     : await startCapture(tab.id, id).catch((e) => {
         captureError = String(e?.message ?? e);
@@ -662,8 +664,7 @@ async function ensureOffscreen(): Promise<void> {
 
 /** Read here, because the offscreen document has no chrome.storage. */
 async function storedTier(): Promise<string> {
-  const stored = await chrome.storage.local.get('modelTier');
-  return (stored?.modelTier as string) ?? 'base.en';
+  return (await loadSettings()).modelTier;
 }
 
 async function startCapture(
@@ -676,6 +677,8 @@ async function startCapture(
   streamError: string | null;
 } | null> {
   await ensureOffscreen();
+
+  const settings = await loadSettings();
 
   // MV3 mints a stream id in the worker which the offscreen document then
   // redeems — `chrome.tabCapture.capture()` cannot run in a worker at all.
@@ -698,7 +701,9 @@ async function startCapture(
     // Optional, default on. No speech simply means no .srt; it must never cost
     // the recording.
     withMic: true,
-    tier: await storedTier(),
+    tier: settings.modelTier,
+    micDeviceId: settings.micDeviceId,
+    liveTranscription: settings.liveTranscription,
   });
   if (!res || res.error) throw new Error(res?.error ?? 'Capture failed to start');
   return {

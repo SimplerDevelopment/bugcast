@@ -39,6 +39,7 @@ export default defineManifest({
   },
 
   icons: { 16: 'icons/16.png', 32: 'icons/32.png', 48: 'icons/48.png', 128: 'icons/128.png' },
+  options_page: 'src/options/index.html',
   action: {
     default_popup: 'src/popup/index.html',
     default_icon: { 16: 'icons/16.png', 32: 'icons/32.png', 48: 'icons/48.png' },

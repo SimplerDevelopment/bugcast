@@ -24,10 +24,24 @@ const DRAG_THRESHOLD_PX = 5;
 /** A focus arriving within this of a click on the same element is that click. */
 const FOCUS_ECHO_MS = 300;
 
+/**
+ * Whether the user opted into capturing typed values.
+ *
+ * Read once at injection. Content scripts can reach extension storage directly,
+ * so this does not need to travel through the worker — and reading it per event
+ * would put an async hop inside a capture-phase listener.
+ */
+let captureTypedValues = false;
+
 (() => {
   const w = window as unknown as { __bugcast?: boolean };
   if (w.__bugcast) return; // injection can race a navigation
   w.__bugcast = true;
+
+  void chrome.storage.local
+    .get('typedValues')
+    .then((s) => (captureTypedValues = s?.typedValues === true))
+    .catch(() => {});
 
   const send = (kind: string, payload: Record<string, unknown>): void => {
     // Fire-and-forget: the worker may be asleep between events, and a failed
@@ -221,6 +235,8 @@ function describeFieldValue(
   }
 
   const value = (el as HTMLInputElement).value ?? '';
+  // Detection runs regardless: the setting relaxes the default, it does not
+  // disable the check. A password stays withheld even with capture turned on.
   if (
     isSensitiveField({
       type,
@@ -234,5 +250,6 @@ function describeFieldValue(
     // Even the shape is withheld here — "card" or "jwt" is itself a disclosure.
     return { redacted: true, chars: value.length, shape: 'sensitive' };
   }
+  if (captureTypedValues) return { redacted: false, value };
   return { redacted: true, ...describeValue(value) };
 }

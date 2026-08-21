@@ -176,6 +176,9 @@ async function start(msg: {
    * the truth. Same reason the popup passes tabId and pageUrl to the worker.
    */
   tier: ModelTier;
+  /** Empty means the system default input. */
+  micDeviceId?: string;
+  liveTranscription?: boolean;
 }): Promise<unknown> {
   if (live) return { error: 'Already recording.' };
 
@@ -191,6 +194,10 @@ async function start(msg: {
     try {
       micStream = await navigator.mediaDevices.getUserMedia({
         audio: {
+          // `exact` deliberately: silently falling back to a different
+          // microphone than the one chosen is worse than failing, because the
+          // result is a transcript of the wrong room.
+          ...(msg.micDeviceId ? { deviceId: { exact: msg.micDeviceId } } : {}),
           // Explicit, not default. Tab audio plays through the speakers while
           // recording, so without echo cancellation the mic re-records it;
           // and Whisper is markedly worse on an un-gained, noisy signal.
@@ -254,10 +261,12 @@ async function start(msg: {
   // so on a static page frame 0 can be seconds stale — never anchor on it.
   liveOffset = 0;
   liveBusy = false;
-  state.liveTimer = setInterval(
-    () => void transcribeLiveWindow(state.pcm),
-    2_000,
-  ) as unknown as number;
+  // Off means the session still gets a full transcript at stop — it just is not
+  // readable while recording, and the CPU stays with the app under test.
+  state.liveTimer =
+    msg.liveTranscription === false
+      ? 0
+      : (setInterval(() => void transcribeLiveWindow(state.pcm), 2_000) as unknown as number);
 
   state.recorder.start(CHUNK_MS);
   const t0 = Date.now();

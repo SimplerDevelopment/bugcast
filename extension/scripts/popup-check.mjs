@@ -22,7 +22,22 @@ await page.goto(`chrome-extension://${id}/src/popup/index.html`);
 await page.waitForTimeout(2500);
 
 const html = await page.evaluate(() => document.getElementById('root')?.innerHTML ?? '(no #root)');
-console.log('\n=== rendered ===');
-console.log(html.slice(0, 500) || '(EMPTY)');
+console.log('\n=== popup ===');
+console.log(html.slice(0, 300) || '(EMPTY)');
+
+// The options page is a separate entry point and a separate way to break.
+const options = await ctx.newPage();
+options.on('pageerror', (e) => console.log('[OPTIONS ERROR]', e.message));
+await options.goto(`chrome-extension://${id}/src/options/index.html`);
+await options.waitForTimeout(1500);
+const sections = await options.evaluate(() =>
+  [...document.querySelectorAll('h2')].map((h) => h.textContent),
+);
+console.log('\n=== options sections ===');
+console.log(sections.join(' · ') || '(EMPTY)');
+if (sections.length < 5) {
+  console.error('FAIL: options page did not render its sections');
+  process.exitCode = 1;
+}
 console.log('\nbody size:', JSON.stringify(await page.evaluate(() => ({ w: document.body.scrollWidth, h: document.body.scrollHeight }))));
 await ctx.close();

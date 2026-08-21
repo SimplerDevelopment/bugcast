@@ -292,8 +292,11 @@ export function App() {
 
       <div className="flex items-center justify-between gap-2 text-xs text-neutral-500">
         <span className="truncate">Saving to {folder}</span>
-        <button onClick={choose} className="shrink-0 underline hover:text-neutral-900">
-          Change
+        <button
+          onClick={() => void chrome.runtime.openOptionsPage()}
+          className="shrink-0 underline hover:text-neutral-900"
+        >
+          Settings
         </button>
       </div>
 
