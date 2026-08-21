@@ -167,7 +167,7 @@ drive — they need a human, and this is already recorded in
 
 ## Where things are
 
-- `docs/design/map.md` — the decision map. Thirteen resolved tickets in
+- `docs/design/map.md` — the decision map. Fifteen resolved tickets in
   `docs/design/issues/`, each with its reasoning **and its rejected
   alternatives**. Read the relevant one before changing behaviour it settled.
 - `docs/design/prototype/` — a hand-authored example session. The artifact
@@ -188,6 +188,25 @@ Shipped: #1 clock · #2 CDP capture · #3 redaction · #7 disk output ·
 #8 frame index · #10 recording UX · #11 self-test · #12 MCP server ·
 #14 (closed as a false alarm) · #15 zip fallback · #13 CI and release.
 
-**All filed issues are closed.** What remains is not on the tracker: the three
-things needing a human (above), a Web Store submission, and whatever real use
-turns up.
+**#1-#16 are closed. #17-#24 are open**, all derived from
+[ticket 17](docs/design/issues/17-what-a-project-contributes.md) and the
+research pass behind it:
+
+- **#17** the app-meta extension point — *built and smoke-verified, awaiting its
+  commit*. Note it does **not** bump `schemaVersion`: additive changes do not,
+  and a bump would make the MCP server refuse every session recorded earlier.
+- **#18** `session_tail`'s opt-in `waitMs` ceiling · **#19** demote the channel
+  to a flagged extra and record the MCP SDK protocol hazard · **#20** the
+  duplicate `lastSession` write.
+- **#21** measure `tailEvents` before touching the cursor · **#22** a clean-room
+  harness for `Debugger.enable`, which **blocks #23**, source maps.
+- **#24** a second research pass — four areas where nothing survived
+  verification, including whether ticket 11 was right to ship no skill.
+
+Read ticket 17 before picking any of these up: it corrects 16, reopens 11's
+no-skill decision, and names two measurement gates that must not be skipped.
+**#22 and #23 are ordered, not parallel** — the domain cost decides whether the
+Debugger domain can be always-on at all.
+
+Not on the tracker: the three things needing a human (above), and a Web Store
+submission.

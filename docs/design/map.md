@@ -266,7 +266,62 @@ the destination is a working published repo, not a spec.
   tool. Rejected a local WebSocket — lowest latency, but a listening socket
   inside a tool whose identity is "no server" is a line not worth crossing.
 
+- [What a developer's own project contributes, and how an agent follows it live](issues/17-what-a-project-contributes.md) —
+  **Corrects 16's channel optimism.** Push works, but `--channels` accepts only
+  plugins on an Anthropic-curated allowlist; the Team/Enterprise escape
+  *replaces* that list rather than extending it and names a plugin+marketplace,
+  so a bare `server:bugcast` entry cannot be allowlisted at all, and nothing
+  helps Pro/Max/no-org users. The channel stays as a flagged extra; **the
+  flag-free live surface is `session_tail`**, better resourced than we were
+  using it — a main-conversation MCP call is auto-backgrounded at 120s, so the
+  30s `waitMs` cap becomes an opt-in ~110s ceiling (opt-in because backgrounding
+  is main-conversation only: never subagents, never headless). New standing
+  hazard: on the v2 MCP runtime a server negotiating protocol `2026-07-28` is
+  **silently not registered as a channel**, so the SDK version is load-bearing.
+  The app-meta extension point is **W3C User Timing** — `performance.mark`/
+  `measure` with a structured-clone `detail`, so the page never needs to know
+  Bugcast exists; `console.timeStamp` is a dead end, trace-only and absent from
+  the `Runtime.consoleAPICalled` enum. **Two shapes, not one**: session-scoped
+  meta (last write wins, into `session.json`) is a different thing from
+  timeline-scoped annotation (append-only, carries `t`) — take OpenReplay's
+  split, refuse its declare-fields-first config. Anything the page hands over
+  gets **three caps with distinct sentinels** (depth + breadth + string length),
+  because depth alone caps *nesting, not size* and a flat 100k-key flag map
+  sails straight through it — which applies equally to the console-object
+  structure `renderArgs` currently flattens away. **Source maps are the
+  highest-leverage gap** and CDP gives them to nobody for free (chrome-devtools-mcp
+  had to import DevTools' own machinery); `Debugger.scriptParsed` replays for
+  already-loaded scripts and carries a non-experimental `sourceMapURL`, so
+  **index at capture time, resolve at read time** against the developer's
+  checkout — recording stays network-free. Gated on measuring what
+  `Debugger.enable` costs, since it puts V8 in debug mode and the current
+  domains do not. Reopens 11's no-skill decision. Rejected: a channel reply tool
+  (breaks read-only), fetching maps while recording (breaks zero-network), and a
+  byte-offset cursor adopted on principle (trades a correctness property for an
+  unmeasured win).
+
 ## Not yet specified
+
+- **What is measured, and what is folklore.** Kept explicitly, because a
+  research pass in Aug 2026 confirmed 18 claims about the live-agent path, the
+  app-meta bridge and source maps and produced **zero** surviving claims about
+  performance — so the following are currently *hypotheses held with confidence
+  they have not earned*, and none should be acted on without a number:
+  transformers.js WebGPU-vs-WASM Whisper RTF and whether WebGPU is even
+  available inside an MV3 offscreen document; VAD to skip transcribing silence;
+  the cost of `Debugger.enable` on the app under test — **attempted and
+  inconclusive**, bounded at <~8% but unable to rule out the harness's own
+  confound (ticket 17); CDP
+  Network/Runtime attach overhead; VP8 vs VP9 vs AV1 encode cost at 15fps; MV3
+  service-worker keepalive best practice in 2026; File System Access append
+  throughput; and whether a byte-offset cursor measurably beats the line cursor
+  at realistic session sizes. **What *is* measured** lives in the code that
+  earned it: append cost is flat at 8-35ms from 2KB to 680KB
+  (`scripts/flush-probe.mjs`); a 150ms debounce cost a 1251ms median
+  click-to-disk because MV3 does not service timers while dormant (`f07f9b0`);
+  MediaRecorder t0 skew is one frame interval (ticket 13). The rule this
+  section exists to enforce: a perf change lands with its probe, or it does not
+  land.
 
 - **Which transcription backend is actually faster here.** One primary benchmark
   found WASM beating WebGPU for Whisper, contradicting vendor claims. Must be
