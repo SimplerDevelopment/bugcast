@@ -27,6 +27,7 @@ import {
   tailEvents,
   tailEventsWaiting,
   MAX_WAIT_MS,
+  SAFE_WAIT_MS,
   listSessionIds,
   readFrame,
   readReport,
@@ -166,7 +167,9 @@ server.registerTool(
         .max(MAX_WAIT_MS)
         .optional()
         .describe(
-          `Block up to this many ms (max ${MAX_WAIT_MS}) for new events. Prefer this over a polling loop: one call per burst of activity rather than one per interval.`,
+          `Block up to this many ms for new events, instead of polling — one call per burst of activity rather than one per interval. ` +
+            `Up to ${SAFE_WAIT_MS} is safe from anywhere. Values above that (max ${MAX_WAIT_MS}) are for a follow-loop in the main conversation, ` +
+            `where a call still running at 120s becomes a background task; a subagent or headless run has no such rescue and will simply block.`,
         ),
     },
   },

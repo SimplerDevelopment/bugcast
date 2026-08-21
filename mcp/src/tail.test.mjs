@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { isLive, MAX_WAIT_MS, tailEvents, tailEventsWaiting, waitForChange } from './sessions.mjs';
+import { isLive, MAX_WAIT_MS, SAFE_WAIT_MS, tailEvents, tailEventsWaiting, waitForChange } from './sessions.mjs';
 
 function fixture(ndjson, { timeline = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bugcast-tail-'));
@@ -120,7 +120,11 @@ test('waitForChange caps the wait, so a tool call cannot be held open forever', 
   setTimeout(() => fs.appendFileSync(path.join(root, id, 'events.ndjson'), line(2) + '\n'), 50);
   await waiting;
   assert.ok(Date.now() - started < MAX_WAIT_MS + 1000);
-  assert.equal(MAX_WAIT_MS, 30_000);
+  // The ceiling is opt-in headroom for a main-conversation follow-loop; the
+  // value safe from any caller stays 30s.
+  assert.equal(MAX_WAIT_MS, 110_000);
+  assert.equal(SAFE_WAIT_MS, 30_000);
+  assert.ok(SAFE_WAIT_MS < MAX_WAIT_MS);
 });
 
 test('waitForChange tolerates a session directory that does not exist yet', async () => {

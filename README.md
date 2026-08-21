@@ -134,6 +134,21 @@ session_tail({ sessionId: "latest" })                    -> events
 session_tail({ sessionId: "latest", stream: "speech" })  -> narration
 ```
 
+**The follow-loop is the live pattern.** Pass `waitMs` and the call blocks until
+something actually happens instead of returning empty, so an agent spends one
+call per burst of activity rather than one per interval:
+
+```
+session_tail({ sessionId: "latest", cursor, waitMs: 100000 })
+```
+
+The wait is `fs.watch`-driven, so it costs nothing while nothing is happening.
+Up to 30s is safe from anywhere. Above that — the ceiling is 110s — is for a
+loop running in the **main conversation**, where Claude Code turns a call still
+running at two minutes into a background task and carries on. A subagent or a
+headless run gets no such rescue and will simply block for the full wait, so
+keep those at 30s.
+
 Events and narration are **separate outputs**. Both carry `t` in milliseconds
 from the same origin, so merging on it is exact — and worth doing, because
 narration lands *before* the action it describes. `report.md` merges them for

@@ -169,8 +169,30 @@ export async function tailEvents(root, id, cursor = 0, limit = 200, stream = 'ev
   };
 }
 
-/** Never hold a tool call open longer than this. */
-export const MAX_WAIT_MS = 30_000;
+/**
+ * Never hold a tool call open longer than this.
+ *
+ * Raised from 30s once the platform limit was actually checked. Claude Code
+ * moves a **main-conversation** MCP call still running at 120s to a background
+ * task and carries on (v2.1.212+), and a stdio server like this one has no 60s
+ * per-request timer at all — that applies to HTTP/SSE servers. So a long wait
+ * costs a follow-loop nothing: `waitForChange` is `fs.watch`-driven, and
+ * waiting is free while nothing happens.
+ *
+ * 110s rather than 120s, to settle before the backgrounding threshold rather
+ * than racing it.
+ */
+export const MAX_WAIT_MS = 110_000;
+
+/**
+ * The longest wait that is safe for *any* caller.
+ *
+ * Backgrounding is main-conversation only — never subagents, never IDE-server
+ * calls, never non-interactive mode unless CLAUDE_AUTO_BACKGROUND_TASKS=1. A
+ * subagent asking for 110s simply blocks for 110s, which is why the larger
+ * ceiling is opt-in rather than the default this advertises.
+ */
+export const SAFE_WAIT_MS = 30_000;
 
 /**
  * Wait for the stream to grow, or give up.
