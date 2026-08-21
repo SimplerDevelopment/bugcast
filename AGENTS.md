@@ -77,6 +77,15 @@ Every one of these was found the expensive way. Do not rediscover them.
 - **Text content is not an accessible name for a form control** — a `<select>`'s
   is every option concatenated. And a container's "name" identifies the whole
   page, so text selectors are leaf-only.
+- **The service worker must be kept awake for the whole recording.** MV3
+  suspends an idle worker at ~30s, and a recording is idle from its point of
+  view while the user reads or talks. When it dies `active` goes with it, every
+  later event hits `if (!active) return` and is silently dropped, and the badge
+  still says REC.
+- **The harness cannot reproduce worker termination.** Playwright attaches a
+  debugger to the service worker, which prevents suspension — `scripts/idle-probe.mjs`
+  passes with the keepalive removed. Treat anything about worker lifetime as
+  unverified by CI and confirm it by hand.
 - **Appending is cheap and does NOT get more expensive as the file grows** —
   measured at 8-35ms whether the file is 2KB or 680KB (`scripts/flush-probe.mjs`).
   Chrome is not copying the file on each open, so do not batch writes to "save"

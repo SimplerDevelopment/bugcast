@@ -40,6 +40,8 @@ interface Recording {
   title: string;
   id: string;
   video: boolean;
+  /** Stops the worker being terminated mid-session. See keepAwake(). */
+  awake: number;
   /**
    * Two streams, written independently.
    *
@@ -211,6 +213,7 @@ async function start(
     // No shared interval: each stream schedules its own flush when something
     // is queued, so events do not wait on a tick that has not come round yet.
     flushTimer: 0,
+    awake: keepAwake(),
     startedAt,
     redactor,
     title: title || tab.title || tab.url || 'Session',
@@ -218,6 +221,14 @@ async function start(
     id,
     video: Boolean(capture),
   };
+  // Anything captured before `active` existed was copied into the queue but
+  // never scheduled — only queueLine sets the debounce timer. On a quiet page
+  // with no later event to trigger a flush, those lines sat in memory forever
+  // and the stream stayed empty.
+  for (const name of ['events', 'speech'] as const) {
+    if (active.streams[name].pending.length) void flushStream(active.streams[name]);
+  }
+
   setBadge(true);
   await chrome.storage.local.set({ recording: true });
   return {
@@ -236,6 +247,7 @@ async function stop(): Promise<Response> {
   if (!active) return { ok: true, recording: false };
   const { cdp, events, startedAt, redactor, title, startUrl, id, video } = active;
   await chrome.storage.local.set({ recording: false });
+  clearInterval(active.awake);
   clearInterval(active.flushTimer);
   await flushEvents();
   active = null;
@@ -612,6 +624,29 @@ function setBadge(recording: boolean): void {
   });
 }
 
+/**
+ * A recording flag with no recording behind it means the worker was terminated
+ * mid-session and everything since was lost. Surfaced rather than left as a
+ * badge that lies.
+ */
+void chrome.storage.local.get('recording').then((stored) => {
+  if (stored?.recording && !active) {
+    console.warn('[bugcast] worker restarted mid-session — that recording was lost');
+    void chrome.storage.local.set({
+      recording: false,
+      lastSession: {
+        id: 'interrupted',
+        written: null,
+        writeError:
+          'The extension was suspended mid-recording, so the session ended early. Whatever had already been written to events.ndjson is still on disk.',
+        events: 0,
+        frames: 0,
+      },
+    });
+    setBadge(false);
+  }
+});
+
 chrome.commands.onCommand.addListener((command) => {
   if (command === 'drop-marker') {
     dropMarker('Marked from the keyboard');
@@ -647,6 +682,27 @@ function dropMarker(note: string): boolean {
 }
 
 const OFFSCREEN_URL = 'offscreen.html';
+
+/**
+ * Keep the worker alive for the whole recording.
+ *
+ * MV3 terminates an idle service worker after about 30 seconds, and a recording
+ * is mostly idle from the worker's point of view — the user is reading, thinking
+ * or talking, and no extension event fires. When it is killed mid-session
+ * `active` goes with it, so every later event hits `if (!active) return` and is
+ * silently dropped, the queued lines die unflushed, and the badge still says
+ * REC. That is both symptoms of "too much latency and missing events" from one
+ * cause.
+ *
+ * It never showed up in the harness because a scripted session is five seconds
+ * of constant activity and never idles.
+ *
+ * Any extension API call resets the idle timer. 20s leaves margin under the 30s
+ * limit.
+ */
+function keepAwake(): number {
+  return setInterval(() => void chrome.runtime.getPlatformInfo(), 20_000) as unknown as number;
+}
 
 /**
  * Keep the service worker alive across a long offscreen operation.
