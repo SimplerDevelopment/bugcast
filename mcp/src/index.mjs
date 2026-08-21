@@ -24,6 +24,8 @@ import {
   assertReadable,
   filterEvents,
   tailEvents,
+  tailEventsWaiting,
+  MAX_WAIT_MS,
   listSessionIds,
   readFrame,
   readReport,
@@ -115,18 +117,32 @@ server.registerTool(
   {
     title: 'Read a session as it is being recorded',
     description:
-      'Events since a cursor, from the append-only stream. Works while recording is still in progress — poll with the returned cursor to follow along. Speech events flagged provisional:true are from a rolling window and are replaced by the final transcript when the session stops.',
+      'Events since a cursor, from the append-only stream. Works while recording is in progress. Pass waitMs to block until something happens instead of polling — the call returns as soon as events arrive, or empty at the deadline. Speech events flagged provisional:true come from a rolling window and are replaced by the final transcript when the session stops.',
     inputSchema: {
       sessionId: z.string().describe('Or "latest" for the most recent session.'),
       cursor: z.number().int().min(0).default(0).optional(),
       limit: z.number().int().min(1).max(500).default(200).optional(),
+      waitMs: z
+        .number()
+        .int()
+        .min(0)
+        .max(MAX_WAIT_MS)
+        .optional()
+        .describe(
+          `Block up to this many ms (max ${MAX_WAIT_MS}) for new events. Prefer this over a polling loop: one call per burst of activity rather than one per interval.`,
+        ),
     },
   },
-  async ({ sessionId, cursor = 0, limit = 200 }) => {
+  async ({ sessionId, cursor = 0, limit = 200, waitMs = 0 }) => {
     const ids = await listSessionIds(ROOT);
     const id = sessionId === 'latest' ? ids[0] : resolveSessionId(sessionId, ids);
     if (!id) return text({ error: 'No sessions recorded yet.' });
-    return text(await tailEvents(ROOT, id, cursor, limit));
+
+    return text(
+      waitMs
+        ? await tailEventsWaiting(ROOT, id, cursor, limit, waitMs)
+        : await tailEvents(ROOT, id, cursor, limit),
+    );
   },
 );
 

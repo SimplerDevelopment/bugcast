@@ -8,6 +8,7 @@
  */
 
 import { mkdir, readdir, readFile, stat } from 'node:fs/promises';
+import { watch } from 'node:fs';
 import path from 'node:path';
 
 /** The schema this server understands. Bumped only by a breaking change. */
@@ -161,6 +162,69 @@ export async function tailEvents(root, id, cursor = 0, limit = 200) {
     more: cursor + events.length < lines.length,
     live: await isLive(root, id),
   };
+}
+
+/** Never hold a tool call open longer than this. */
+export const MAX_WAIT_MS = 30_000;
+
+/**
+ * Wait for the stream to grow, or give up.
+ *
+ * `fs.watch` rather than repeated stat calls — FSEvents on macOS, inotify on
+ * Linux — so waiting costs nothing while nothing happens.
+ *
+ * The watch is on the *directory*, not the file: events.ndjson may not exist yet
+ * when an agent starts following a session that is only just beginning, and you
+ * cannot watch a file that is not there.
+ */
+export function waitForChange(root, id, ms) {
+  const deadline = Math.min(Math.max(ms | 0, 0), MAX_WAIT_MS);
+  if (!deadline) return Promise.resolve(false);
+
+  return new Promise((resolve) => {
+    let watcher;
+    let timer;
+    const done = (changed) => {
+      clearTimeout(timer);
+      try {
+        watcher?.close();
+      } catch {
+        // Already closed, or the directory went away — either way we are done.
+      }
+      resolve(changed);
+    };
+
+    timer = setTimeout(() => done(false), deadline);
+    try {
+      watcher = watch(path.join(root, id), () => done(true));
+    } catch {
+      // No directory to watch yet. The timeout still applies, so the caller
+      // waits and re-reads rather than spinning.
+    }
+  });
+}
+
+/**
+ * Read the stream, waiting for it to grow if there is nothing new yet.
+ *
+ * Loops rather than returning on the first watch event, because `fs.watch`
+ * fires for things that are not new lines — a metadata touch on macOS is
+ * enough. Returning empty on a spurious wake would put the caller straight back
+ * into the polling loop this exists to remove, so it keeps waiting until there
+ * are genuinely new events or the deadline passes.
+ */
+export async function tailEventsWaiting(root, id, cursor = 0, limit = 200, waitMs = 0) {
+  const deadline = Date.now() + Math.min(Math.max(waitMs | 0, 0), MAX_WAIT_MS);
+
+  for (;;) {
+    const out = await tailEvents(root, id, cursor, limit);
+    // Nothing to wait *for* once the session has stopped: no more will arrive.
+    if (out.events.length || !out.live) return out;
+
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return out;
+    await waitForChange(root, id, remaining);
+  }
 }
 
 export async function readFrame(root, id, at) {

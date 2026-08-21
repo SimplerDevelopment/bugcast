@@ -35,9 +35,20 @@ to "what sessions exist", not a reason to fail on the first run.
 ## Following a live session
 
 ```
-session_tail({ sessionId: "latest" })          -> { events, cursor, live: true }
-session_tail({ sessionId: "latest", cursor })  -> only what is new
+session_tail({ sessionId: "latest", waitMs: 30000 })
+  -> { events, cursor, live: true }
+session_tail({ sessionId: "latest", cursor, waitMs: 30000 })
+  -> returns the moment something happens, or empty at the deadline
 ```
+
+**Use `waitMs` instead of a polling loop.** The call blocks until events arrive
+past your cursor, watching the file rather than re-checking it, so you make one
+call per burst of activity instead of one per interval. Polling's real cost is
+not latency — it is that every empty check leaves a tool call and its result in
+the agent's context.
+
+Capped at 30s so a call cannot be held open indefinitely. A finished session
+returns immediately; there is nothing more to wait for.
 
 Speech events flagged `provisional: true` come from a rolling ~10s window during
 recording. They are **replaced** by the authoritative full-audio transcript when
