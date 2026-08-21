@@ -134,6 +134,9 @@ drive — they need a human, and this is already recorded in
 - `extension/src/lib/` — pure, tested modules. Prefer putting logic here.
 - `extension/src/background/` — the service worker: orchestration only.
 - `extension/src/content/` — injected at record time, never declared.
+- `mcp/src/channel.mjs` — pushes into a running Claude Code session. The filter
+  is the design: Claude is turn-based, so pushing every event yields a queue,
+  not continuous reasoning. Only what a person would interrupt you for.
 - `mcp/` — the optional npm package. Plain ESM, no build step, `node --test`.
   Read-only by rule; never add a tool that writes.
 

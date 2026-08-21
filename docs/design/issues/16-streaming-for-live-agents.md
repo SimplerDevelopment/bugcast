@@ -84,6 +84,33 @@ video time — "watch from 02:14.320" resolves without decoding anything, and th
 frame index hands a multimodal agent pixels for a moment on request. Streaming
 changes none of that.
 
+### Push, after all — Claude Code channels
+
+Recorded because I got this wrong first: I claimed an unsolicited notification
+could not wake a model mid-turn, so push was not worth building. **That is
+false.** Claude Code 2.1.238 ships channels — an MCP server declaring
+`capabilities.experimental["claude/channel"]` can send
+`notifications/claude/channel` into a running session and the agent acts on it
+without anyone typing. Verified in the binary: the flags are `--channels` and
+`--dangerously-load-development-channels`, both hidden from `--help`, which is
+why looking there found nothing.
+
+So there are two live surfaces, and they are for different things:
+
+- **`session_tail`** — the agent asks. Complete, cursor-based, cheap to resume.
+- **the channel** — the session tells. Filtered to almost nothing.
+
+**The filter is the whole design.** A recording produces hundreds of events and
+Claude is turn-based, so pushing all of them does not produce continuous
+reasoning — it produces a queue that arrives as one indigestible batch on the
+next turn. What goes through is only what a person would interrupt you for:
+markers, uncaught exceptions, console errors, and failed requests with their
+bodies. Clicks, navigations, successful requests and ordinary logs never do. Nor
+does provisional speech, which changes under a reader.
+
+Events inside one poll are batched into a single notification: five wakes for
+five errors in the same second is five turns spent on one problem.
+
 ### Consequences
 
 - **09** — `events.ndjson` becomes the source; `timeline.json` joins

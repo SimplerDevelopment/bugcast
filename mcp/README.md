@@ -60,6 +60,32 @@ which is sampled inside `MediaRecorder.start()`, so event time *is* video time:
 say "watch from 02:14.320", or ask `session_frame` for that moment. Nothing
 needs to decode the recording.
 
+## Being told instead of asking
+
+Claude Code can register this server as a **channel**, so a recording pushes into
+a running session and the agent reacts without you typing anything:
+
+```bash
+claude --dangerously-load-development-channels bugcast
+```
+
+What gets pushed is deliberately almost nothing — only what a person would
+interrupt you for:
+
+| Pushed | Not pushed |
+|---|---|
+| Moments the tester marked (⌘⇧M) | Clicks, navigations, focus, typing |
+| Uncaught exceptions | Successful requests |
+| Console errors | Ordinary console output |
+| Failed requests, with response bodies | Provisional speech (it changes under you) |
+
+Claude is turn-based, so pushing everything would not produce continuous
+reasoning — it would produce a queue arriving as one indigestible batch. Events
+within the same poll are batched into a single notification for the same reason.
+
+Use `session_tail` when the agent wants the *whole* stream; use the channel to be
+told that something happened.
+
 ## Read-only, always
 
 No write, no delete, no move. An agent must not be able to destroy the evidence

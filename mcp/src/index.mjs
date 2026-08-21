@@ -18,6 +18,7 @@
 import path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { startChannel } from './channel.mjs';
 import { z } from 'zod';
 import os from 'node:os';
 import {
@@ -54,7 +55,33 @@ function parseDir(argv) {
 const ROOT = parseDir(process.argv.slice(2));
 await assertReadable(ROOT);
 
-const server = new McpServer({ name: 'bugcast', version: '0.1.0' });
+const server = new McpServer(
+  { name: 'bugcast', version: '0.1.0' },
+  {
+    // Lets Claude Code register this server as a channel, so a recording can
+    // wake a session rather than waiting to be asked about. Register with:
+    //   claude --dangerously-load-development-channels bugcast
+    capabilities: { experimental: { 'claude/channel': {} } },
+    instructions: `Events arrive from a QA session being recorded in the browser right now.
+
+They are filtered to things a person would interrupt you for: failed requests
+with their response bodies, uncaught exceptions, console errors, and moments the
+tester explicitly marked.
+
+When one arrives:
+  - A MARKED BY THE TESTER event is the strongest signal there is. Someone
+    pressed a key to say "this is the bug". Start there.
+  - A failed request usually carries the answer in its body. Read it before
+    guessing.
+  - Use session_query and session_report for the surrounding context rather than
+    asking for the whole timeline; a long session runs to tens of thousands of
+    tokens.
+  - Use session_frame with a timestamp to see what the page actually showed.
+
+Do not act on every event. A session produces many, and most are noise around
+the one that matters.`,
+  },
+);
 
 const text = (value) => ({
   content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }],
@@ -166,3 +193,6 @@ server.registerTool(
 );
 
 await server.connect(new StdioServerTransport());
+
+// Push after connecting, so the transport exists before the first notification.
+startChannel(server.server, ROOT);
