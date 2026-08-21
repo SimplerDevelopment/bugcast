@@ -143,9 +143,60 @@ const HALLUCINATIONS = [
   /^\[\s*(music|silence|blank_audio|inaudible)\s*\]$/i,
 ];
 
+/**
+ * Whisper loops on non-speech. Given silence, or a fan, it emits a phrase and
+ * then repeats it — something no person does.
+ *
+ * Matched structurally rather than by phrase, because the loop is never the
+ * same text twice: one session produced "a little bit of" three times over,
+ * another "I'm going to go" eight times. A fixed list cannot keep up with that,
+ * which is why HALLUCINATIONS above catches none of it.
+ */
+const LOOP_MAX_GRAM = 6;
+const LOOP_MIN_REPEATS = 3;
+
+/**
+ * How much of a segment a back-to-back repeat takes up.
+ *
+ * Coverage rather than mere presence, because a real utterance can END in a
+ * repeat: "Okay. No, it's not. Okay. Okay. Okay." is someone talking, and the
+ * loop is 43% of it — dropping the segment would cost the "No, it's not" in
+ * front. A degenerate loop dominates instead, measured at 60% on real captures.
+ * Nothing observed lands between the two, so the threshold sits in open space.
+ */
+export function loopCoverage(text: string): number {
+  const words = text.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return 0;
+
+  const repeatsAt = (start: number, size: number): number => {
+    let reps = 1;
+    outer: for (;;) {
+      const next = start + size * reps;
+      if (next + size > words.length) break;
+      for (let j = 0; j < size; j++) if (words[next + j] !== words[start + j]) break outer;
+      reps++;
+    }
+    return reps;
+  };
+
+  let best = 0;
+  for (let size = 1; size <= LOOP_MAX_GRAM; size++) {
+    for (let i = 0; i + size * LOOP_MIN_REPEATS <= words.length; i++) {
+      const reps = repeatsAt(i, size);
+      if (reps >= LOOP_MIN_REPEATS) best = Math.max(best, (size * reps) / words.length);
+    }
+  }
+  return best;
+}
+
+/** Above this share of a segment, the repeat IS the segment. */
+export const LOOP_COVERAGE_LIMIT = 0.5;
+
 export function isLikelyHallucination(text: string): boolean {
   const trimmed = text.trim();
-  return !trimmed || HALLUCINATIONS.some((p) => p.test(trimmed));
+  if (!trimmed) return true;
+  if (HALLUCINATIONS.some((p) => p.test(trimmed))) return true;
+  return loopCoverage(trimmed) >= LOOP_COVERAGE_LIMIT;
 }
 
 export function cleanSegments(segments: Segment[]): Segment[] {
