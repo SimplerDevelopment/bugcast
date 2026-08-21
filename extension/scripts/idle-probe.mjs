@@ -1,5 +1,19 @@
 // Does a recording survive an idle gap longer than MV3's ~30s worker timeout?
 // The scripted smoke never idles, which is why this class of bug reached a user.
+//
+// ⚠️ IT DOES NOT ANSWER THAT QUESTION. Measured 2026-08-20: delete keepAwake()
+// from the built bundle entirely and this still prints PASS. Chrome does not
+// terminate a service worker that is being inspected, and Playwright is
+// CDP-attached to the worker target for the life of the context — so the thing
+// the probe exists to detect cannot happen while the probe is watching. The
+// open extension page below is a second confound of the same kind.
+//
+// So: a PASS here means nothing, and a FAIL is still worth reading. Do not add
+// it to a gate, and do not let it stand in for evidence from a real session.
+// Making it honest needs a way to terminate the worker deliberately (CDP
+// Target.closeTarget / chrome.runtime.reload) and to assert on what the user is
+// told afterwards — the "worker restarted mid-session" path — rather than
+// waiting on an idle timer that a debugger is holding off.
 import { chromium } from 'playwright';
 import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path';
 import http from 'node:http';
