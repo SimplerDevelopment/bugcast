@@ -113,6 +113,10 @@ console.log('extension id:', extId);
 // The page under test. Playwright attaches to it, which is the interesting
 // question: does chrome.debugger.attach conflict with an existing CDP client?
 const target = await ctx.newPage();
+// Nothing this extension does may surface in the page it is recording. The
+// harness throws one deliberate error; anything else is ours and is a bug.
+const pageErrors = [];
+target.on('pageerror', (e) => pageErrors.push(e.message));
 await target.goto(`http://localhost:${PORT}/`);
 
 // Grab the id while the target is still the active tab — tab.url is not
@@ -447,6 +451,12 @@ for (const required of ['session.json', 'timeline.json', 'report.md', 'events.nd
 // the CORS reason. Recorded naively it reads as a clean success, which is not
 // merely incomplete but the opposite of what the developer saw.
 const cors = (stopped.events ?? []).find((e) => e.type === 'network' && e.url.includes('/blocked'));
+const ours = pageErrors.filter((e) => !e.includes('boom from the page'));
+if (ours.length) {
+  console.error(`FAIL: the extension threw ${ours.length} error(s) into the page: ${ours[0]}`);
+  process.exitCode = 1;
+}
+
 console.log('\n=== cors ===');
 console.log(cors?.failure ? `blocked: ${cors.failure.errorText} / ${cors.failure.corsErrorStatus}` : 'NOT RECORDED AS A FAILURE');
 if (!cors?.failure?.corsErrorStatus) {

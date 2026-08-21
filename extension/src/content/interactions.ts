@@ -33,28 +33,93 @@ const FOCUS_ECHO_MS = 300;
  */
 let captureTypedValues = false;
 
+/**
+ * Whether this script still has a live extension behind it.
+ *
+ * Reloading the extension does not remove content scripts already injected into
+ * open pages — they keep running with a dead context, and every `chrome.*` call
+ * then throws **synchronously** with "Extension context invalidated". A
+ * `.catch()` does not help: there is no promise, the throw escapes into the
+ * page, and the page's console fills with errors from the tool that is supposed
+ * to be *recording* that console.
+ */
+let alive = true;
+
 (() => {
   const w = window as unknown as { __bugcast?: boolean };
   if (w.__bugcast) return; // injection can race a navigation
   w.__bugcast = true;
 
-  void chrome.storage.local
-    .get('typedValues')
-    .then((s) => (captureTypedValues = s?.typedValues === true))
-    .catch(() => {});
+  const listeners: Array<[keyof WindowEventMap, EventListener]> = [];
+
+  /**
+   * Stop cleanly once the extension is gone.
+   *
+   * Without this every subsequent click, keypress and scroll would throw again
+   * — an orphaned script quietly vandalising a page it can no longer report on.
+   */
+  const teardown = (): void => {
+    if (!alive) return;
+    alive = false;
+    for (const [type, handler] of listeners) {
+      window.removeEventListener(type, handler, { capture: true } as EventListenerOptions);
+    }
+    listeners.length = 0;
+    w.__bugcast = false; // let a fresh injection take over this page
+  };
+
+  /** `chrome.runtime.id` is undefined once the context has been invalidated. */
+  const contextGone = (): boolean => {
+    try {
+      return !chrome?.runtime?.id;
+    } catch {
+      return true;
+    }
+  };
+
+  try {
+    void chrome.storage.local
+      .get('typedValues')
+      .then((s) => (captureTypedValues = s?.typedValues === true))
+      .catch(() => {});
+  } catch {
+    teardown();
+    return;
+  }
 
   const send = (kind: string, payload: Record<string, unknown>): void => {
-    // Fire-and-forget: the worker may be asleep between events, and a failed
-    // send must never surface in the page being tested.
-    void chrome.runtime
-      .sendMessage({ type: INTERACTION, kind, epochMs: Date.now(), ...payload })
-      .catch(() => {});
+    if (!alive) return;
+    if (contextGone()) return teardown();
+    // try/catch, not just .catch(): an invalidated context throws
+    // synchronously, so there is no promise to reject. Nothing this script does
+    // may ever surface in the page being recorded.
+    try {
+      void chrome.runtime
+        .sendMessage({ type: INTERACTION, kind, epochMs: Date.now(), ...payload })
+        .catch(() => {});
+    } catch {
+      teardown();
+    }
   };
 
   const on = <K extends keyof WindowEventMap>(
     type: K,
     handler: (e: WindowEventMap[K]) => void,
-  ): void => window.addEventListener(type, handler, { capture: true, passive: true });
+  ): void => {
+    // Wrapped so a throw anywhere in capture cannot reach the page, and kept so
+    // teardown can remove it.
+    const guarded = ((e: Event) => {
+      if (!alive) return;
+      try {
+        handler(e as WindowEventMap[K]);
+      } catch {
+        // A single malformed element must not break capture, and must not
+        // surface in the console being recorded.
+      }
+    }) as EventListener;
+    listeners.push([type, guarded]);
+    window.addEventListener(type, guarded, { capture: true, passive: true });
+  };
 
   const elementOf = (e: Event): Element | null => {
     // composedPath sees through open shadow roots; a *closed* root retargets to

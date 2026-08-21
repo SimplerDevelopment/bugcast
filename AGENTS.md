@@ -124,6 +124,23 @@ Every one of these was found the expensive way. Do not rediscover them.
   the middle of a tool whose premise is that it runs locally. `scripts/copy-ort.mjs`
   copies the two runtimes actually used; copying all of them is 94MB.
 
+## Nothing may surface in the page
+
+The extension records the page's console. Anything it throws there it will also
+*record*, and a QA tool contaminating its own evidence is the worst failure mode
+available.
+
+- **An invalidated context throws SYNCHRONOUSLY.** Reloading the extension
+  leaves content scripts running in open pages with a dead context, and every
+  `chrome.*` call then throws "Extension context invalidated". `.catch()` does
+  not help — there is no promise. Wrap in try/catch, check `chrome.runtime?.id`,
+  and tear down listeners so an orphan stops rather than throwing on every click
+  forever.
+- Every content-script listener is wrapped so a throw cannot escape.
+- `scripts/orphan-probe.mjs` reproduces it: reload the extension mid-session,
+  then interact. It counted 18 page errors before the fix and 0 after. The smoke
+  asserts zero unexpected page errors on every run.
+
 ## `bun run smoke` is not optional
 
 It launches a real Chromium with the built extension and records against a
