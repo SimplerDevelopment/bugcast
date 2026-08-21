@@ -309,9 +309,7 @@ the destination is a working published repo, not a spec.
   they have not earned*, and none should be acted on without a number:
   transformers.js WebGPU-vs-WASM Whisper RTF and whether WebGPU is even
   available inside an MV3 offscreen document; VAD to skip transcribing silence;
-  the cost of `Debugger.enable` on the app under test — **attempted and
-  inconclusive**, bounded at <~8% but unable to rule out the harness's own
-  confound (ticket 17); CDP
+  CDP
   Network/Runtime attach overhead; VP8 vs VP9 vs AV1 encode cost at 15fps; MV3
   service-worker keepalive best practice in 2026; File System Access append
   throughput. **What *is* measured** lives in the code that
@@ -324,8 +322,16 @@ the destination is a working published repo, not a spec.
   0.42ms per wake. The O(n²) is real but only bites a pathological 10k-event
   session, which spends 12s of CPU across the whole recording, about 1.3% of one
   core — not worth trading away a cursor that cannot land mid-record. The rule
-  this section exists to enforce: a perf change lands with its probe, or it does
-  not land — and sometimes the probe says the change should not land at all.
+  And **`Debugger.enable` costs nothing measurable** above the domains already
+  attached (`extension/scripts/debugger-cost-cleanroom.mjs`, n=25): -1.2% and
+  -3.6%, interquartile ranges overlapping, in a harness that spawns Chromium
+  itself and attaches only to the extension's service-worker target so it is not
+  a second debugger client on the page. That last part is why this answer counts
+  and the earlier Playwright one did not. Caveat kept: synthetic workloads on a
+  40-module page, so it clears the domain for use rather than promising it is
+  free everywhere. The rule this section exists to enforce: a perf change lands
+  with its probe, or it does not land — and sometimes the probe says the change
+  should not land at all.
 
 - **Which transcription backend is actually faster here.** One primary benchmark
   found WASM beating WebGPU for Whisper, contradicting vendor claims. Must be
