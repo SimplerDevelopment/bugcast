@@ -335,20 +335,6 @@ async function stop(): Promise<Response> {
   }
 
   // Persisted, not just returned. The popup closes the moment you click away,
-  // so a result that only exists in its state is a result the user may never
-  // see — which is how a failed write ends up looking like nothing happened.
-  await chrome.storage.local.set({
-    lastSession: {
-      id,
-      written,
-      writeError,
-      events: events.length,
-      frames: frames.written,
-      at: Date.now(),
-    },
-  });
-
-  // Persisted, not just returned. The popup closes the moment you click away,
   // so a result that lives only in its state is one the user may never see —
   // which is how a failed write ends up looking like nothing happened at all.
   await chrome.storage.local.set({
