@@ -65,6 +65,17 @@ async function readJson(root, id, file) {
 }
 
 export const readManifest = (root, id) => readJson(root, id, 'session.json');
+
+/**
+ * The script index, or an empty list.
+ *
+ * Absent is a normal answer, not an error: a page with no scripts worth
+ * indexing, or a session recorded before the Debugger domain was enabled.
+ */
+export async function readScripts(root, id) {
+  const parsed = await readJson(root, id, 'scripts.json').catch(() => null);
+  return parsed?.scripts ?? [];
+}
 export const readTimeline = (root, id) => readJson(root, id, 'timeline.json');
 
 /**

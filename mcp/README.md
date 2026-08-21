@@ -31,6 +31,7 @@ to "what sessions exist", not a reason to fail on the first run.
 | `session_report` | The human-readable rendering of a finished session. Start here for a post-mortem. |
 | `session_query` | A filtered slice of a finished timeline. `failedOnly: true` answers "what went wrong". |
 | `session_frame` | The JPEG nearest a moment, for seeing what the page showed. |
+| `session_resolve` | Turn a minified stack into real files and lines, using the source maps already in your checkout. |
 
 ## Following a live session
 
@@ -112,6 +113,31 @@ within the same poll are batched into a single notification for the same reason.
 
 Use `session_tail` when the agent wants the *whole* stream; use the channel to be
 told that something happened.
+
+## Resolving a minified stack
+
+A captured frame is `bundle.js:1:38402`. You are sitting in the repo that
+produced that bundle, so the answer is already on your disk:
+
+```
+session_resolve({ sessionId: "latest", stack: "<the stack from the event>" })
+  -> [{ resolved: true, source: "src/editor/save.ts", sourceLine: 142, ... }]
+```
+
+The extension records every script the page loaded with its `sourceMappingURL`,
+but deliberately **does not fetch the maps** — that would be a network call
+inside a tool whose whole premise is that recording makes none. Resolution
+happens here instead, against `process.cwd()`: the project this server was
+launched in. Maps are matched by basename, which content-hashed filenames make
+far less ambiguous than it sounds, and nothing is downloaded.
+
+**It tells you when it does not know.** A frame it cannot place says why — no
+map shipped, the map was inline in the bundle, no such `.map` in this checkout,
+no entry at that position. A guessed frame is worse than an unresolved one,
+because an agent will act on it and edit the wrong file with confidence. If two
+builds are lying around, both are reported rather than one being silently
+preferred, since resolving against a stale `build/` is exactly how you get a
+plausible wrong answer.
 
 ## Read-only, always
 
