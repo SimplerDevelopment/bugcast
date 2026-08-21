@@ -174,6 +174,30 @@ export interface ExceptionEvent extends BaseEvent {
 }
 
 /**
+ * What the application under test said about itself.
+ *
+ * Produced by the page calling `performance.mark('bugcast:<name>', {detail})` —
+ * standard User Timing, not a Bugcast API, so a project takes no dependency to
+ * use it and loses nothing by ignoring it. See `lib/annotate.ts`.
+ *
+ * Additive: `schemaVersion` deliberately does **not** move. A consumer that
+ * does not know this type ignores it, which is the compatibility promise ticket
+ * 09 made when it said additive changes do not bump.
+ */
+export interface AnnotationEvent extends BaseEvent {
+  type: 'annotation';
+  /** The mark name with the `bugcast:` prefix stripped. */
+  name: string;
+  /**
+   * Whatever the page attached, bounded by three caps and then redacted.
+   * Sentinels name which budget was hit — see `lib/annotate.ts`.
+   */
+  detail?: unknown;
+  /** A `measure` carries real duration and sets `tEnd`; a `mark` is an instant. */
+  source: 'mark' | 'measure';
+}
+
+/**
  * `exception` stays distinct from `console` because CDP distinguishes
  * `Runtime.exceptionThrown` from `Runtime.consoleAPICalled`; flattening them
  * would discard that.
@@ -188,6 +212,7 @@ export type TimelineEvent =
   | DragEvent
   | FocusEvent
   | MarkerEvent
+  | AnnotationEvent
   | NetworkEvent
   | ConsoleEvent
   | ExceptionEvent;

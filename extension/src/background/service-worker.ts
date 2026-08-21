@@ -12,6 +12,7 @@ import { runChecks, type Check } from '../lib/self-test';
 import { loadSettings } from '../lib/settings';
 import type { RedactionSummary } from '../lib/redact';
 import {
+  ANNOTATION,
   DROP_MARKER,
   MODEL_PROGRESS,
   OFFSCREEN_SELF_TEST,
@@ -53,6 +54,14 @@ interface Recording {
   stream: Stream;
   writes: Promise<void>;
   /**
+   * What the page said about itself via `performance.mark('bugcast:session')`.
+   *
+   * Session-scoped and merged on write, which is why it does not live in the
+   * event stream: a build SHA is not a thing that happened at a moment, it is a
+   * fact about the session.
+   */
+  app: Record<string, unknown> | null;
+  /**
    * Where the session began. Held separately because `ctx.pageUrl` is *current*
    * page context and navigation mutates it — reading it at stop time reported
    * the last URL as the first one.
@@ -83,6 +92,9 @@ async function handle(msg: any): Promise<Response> {
       return stop();
     case INTERACTION:
       recordInteraction(msg);
+      return { ok: true, recording: active !== null };
+    case ANNOTATION:
+      recordAnnotation(msg);
       return { ok: true, recording: active !== null };
     case RUN_SELF_TEST:
       return { ok: true, recording: active !== null, checks: await selfTest(msg.only) } as never;
@@ -204,6 +216,7 @@ async function start(
     redactor,
     title: title || tab.title || tab.url || 'Session',
     startUrl: ctx.pageUrl,
+    app: null,
     id,
     video: Boolean(capture),
   };
@@ -229,7 +242,7 @@ async function start(
 
 async function stop(): Promise<Response> {
   if (!active) return { ok: true, recording: false };
-  const { cdp, events, startedAt, redactor, title, startUrl, id, video } = active;
+  const { cdp, events, startedAt, redactor, title, startUrl, id, video, app } = active;
   await chrome.storage.local.set({ recording: false });
   clearInterval(active.awake);
   await flushEvents();
@@ -289,7 +302,7 @@ async function stop(): Promise<Response> {
   let report = '';
   try {
     report = renderSessionReport(id, title, startedAt, startUrl, events, redaction);
-    const files = sessionFiles(id, startedAt, startUrl, events, redaction, report, videoOnDisk, segments, frames.written);
+    const files = sessionFiles(id, startedAt, startUrl, events, redaction, report, videoOnDisk, segments, frames.written, app);
     if (hasFolder) {
       try {
         written = await writeSession(id, files);
@@ -399,6 +412,8 @@ function sessionFiles(
   video: boolean,
   segments: Segment[],
   frameCount: number,
+  /** What the page contributed via `bugcast:session`. Absent when it said nothing. */
+  app: Record<string, unknown> | null,
 ): Array<[string, string]> {
   const durationMs = durationOf(events);
 
@@ -417,6 +432,11 @@ function sessionFiles(
           startUrl,
         },
         environment: { userAgent: navigator.userAgent },
+        // Present only when the application under test actually marked
+        // something. An empty object would read as "the app said nothing about
+        // itself", which is true, and as "the app has no build SHA", which is
+        // not — so the key is absent instead.
+        ...(app && Object.keys(app).length ? { app } : {}),
         // ponytail: video (#5), transcript (#6) and frames (#8) are not built
         // yet. Declaring them false is honest — an artifact that silently omits
         // a section reads as "nothing to report" rather than "not captured".
@@ -571,6 +591,70 @@ function recordInteraction(msg: any): void {
     ...rest,
   } as TimelineEvent);
   if (rest?.value?.redacted) active.redactor.countWithheldValue();
+}
+
+/**
+ * What the application under test contributed.
+ *
+ * Two destinations, because they are two different things: `bugcast:session`
+ * is a fact about the session and lands in `session.json`; everything else
+ * happened at a moment and joins the timeline like any other event.
+ *
+ * Redaction runs here rather than in the page, and it runs on every path. A
+ * developer attaching their store is exactly the person who will attach an auth
+ * token without noticing, and the existing body redactor is already JSON-key
+ * aware — reusing it means an `apiKey` in an annotation is treated exactly as
+ * an `apiKey` in a response body, which is the only defensible answer.
+ */
+function recordAnnotation(msg: any): void {
+  if (!active) return;
+  const detail = redactDetail(msg.detail);
+
+  if (msg.scope === 'session') {
+    // Merged, not replaced wholesale: a page that marks route on navigation and
+    // build SHA once at boot would otherwise have the SHA erased by the route.
+    if (detail && typeof detail === 'object') {
+      active.app = { ...(active.app ?? {}), ...(detail as Record<string, unknown>) };
+    }
+    return;
+  }
+
+  const t = toSessionMs(msg.epochMs, active.ctx.t0);
+  recordEvent({
+    type: 'annotation',
+    t,
+    ...(msg.endEpochMs ? { tEnd: toSessionMs(msg.endEpochMs, active.ctx.t0) } : {}),
+    pageUrl: active.ctx.pageUrl,
+    name: String(msg.name ?? ''),
+    ...(detail === undefined ? {} : { detail }),
+    source: msg.source === 'measure' ? 'measure' : 'mark',
+  });
+}
+
+/**
+ * Redact a page-supplied value without flattening it.
+ *
+ * Round-trips through the JSON body redactor, which is key-aware, and back into
+ * an object — structure is the reason an annotation is worth more than a log
+ * line, so returning a redacted *string* would give up the point. If the
+ * round-trip fails the redacted text is kept rather than the raw value: losing
+ * the shape is a cost, leaking is not an option.
+ */
+function redactDetail(detail: unknown): unknown {
+  if (detail === undefined || !active) return undefined;
+  let json: string;
+  try {
+    json = JSON.stringify(detail);
+  } catch {
+    return undefined; // circular, or otherwise not serializable
+  }
+  if (json === undefined) return undefined;
+  const redacted = active.redactor.body(json, 'application/json');
+  try {
+    return JSON.parse(redacted);
+  } catch {
+    return redacted;
+  }
 }
 
 /**

@@ -125,7 +125,10 @@ server.registerTool(
       type: z
         .union([z.string(), z.array(z.string())])
         .optional()
-        .describe('navigation, speech, click, keydown, change, submit, drag, focus, marker, network, console, exception'),
+        .describe(
+          'navigation, speech, click, keydown, change, submit, drag, focus, marker, annotation, network, console, exception. ' +
+            '`annotation` is what the application under test contributed about itself — build, route, flags, state.',
+        ),
       failedOnly: z.boolean().optional().describe('Only failed requests. Aborts do not count.'),
       from: z.number().optional().describe('Milliseconds from session start'),
       to: z.number().optional(),

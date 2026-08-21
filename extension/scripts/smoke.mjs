@@ -41,7 +41,17 @@ const server = http.createServer((req, res) => {
         </form>
         <div id="palette" draggable="true" style="width:80px;height:40px">Testimonial</div>
         <div id="canvas" style="width:300px;height:200px">Canvas</div>
-      </main>`);
+      </main>
+      <script>
+        // Marked during the page's own bootstrap, BEFORE recording starts. The
+        // only way these reach the artifact is PerformanceObserver's buffered
+        // replay, so this is the assertion that the whole app-meta extension
+        // point rests on. The apiKey is deliberate: it must arrive redacted.
+        performance.mark('bugcast:session', {
+          detail: { buildSha: 'smoke-sha', apiKey: 'sk-abcdefghijklmnopqrstuvwxyz012345' },
+        });
+        performance.mark('bugcast:boot', { detail: { phase: 'load' } });
+      <\/script>`);
   } else if (url.pathname === '/ok') {
     res.writeHead(200, { ...cors, 'content-type': 'application/json' });
     res.end('{"ok":true}');
@@ -187,6 +197,13 @@ const clickAt = Date.now();
 let latency = null;
 for (let i = 0; i < 40; i++) {
   const seen = await ext.evaluate(async () => {
+   // This polls a file the worker is writing to at the same time, and
+   // `createWritable()` commits through a swap file — so a read landing inside
+   // that window fails, as NotFoundError or NotReadableError depending on where
+   // it lands. The loop already treats a missing file as "not yet"; a transient
+   // read error is the same answer and must not crash the run. It surfaced as
+   // two different exceptions on two different runs before this guard existed.
+   try {
     const opfs = await navigator.storage.getDirectory();
     const dir = await opfs.getDirectoryHandle('sessions').catch(() => null);
     if (!dir) return 0;
@@ -198,6 +215,9 @@ for (let i = 0; i < 40; i++) {
       return text.split('\n').filter((l) => l.includes('editor-save')).length;
     }
     return 0;
+   } catch {
+    return 0; // mid-write; the next poll reads it whole
+   }
   });
   if (seen >= 2) { latency = Date.now() - clickAt; break; }
   await target.waitForTimeout(25);
@@ -209,6 +229,14 @@ if (latency === null || latency > 1000) {
 }
 
 await target.waitForTimeout(300);
+
+// A mark made *while* recording, which takes the live observer path rather
+// than the buffered replay one. Both have to work.
+await target.evaluate(() => {
+  performance.mark('bugcast:live-step', { detail: { step: 3 } });
+  performance.measure('bugcast:save-span', { start: performance.now() - 40, end: performance.now() });
+});
+await target.waitForTimeout(200);
 
 await target.evaluate((p) => ((window).__otherPort = p), OTHER_PORT);
 await target.evaluate(async (port) => {
@@ -418,6 +446,46 @@ const files = await ext.evaluate(async (id) => {
   }
   return out.sort();
 }, stopped.sessionId);
+// What the application under test said about itself. Unit tests cover the caps
+// in isolation; only this covers the actual path — a buffered PerformanceObserver
+// in a real isolated world, across sendMessage, through the redactor, onto disk.
+const app = await ext.evaluate(async (id) => {
+  const opfs = await navigator.storage.getDirectory();
+  const dir = await opfs.getDirectoryHandle('sessions');
+  const folder = await dir.getDirectoryHandle(id).catch(() => null);
+  if (!folder) return null;
+  const text = await (await (await folder.getFileHandle('session.json')).getFile()).text();
+  return JSON.parse(text).app ?? null;
+}, stopped.sessionId);
+
+const annotations = (stopped.events ?? []).filter((e) => e.type === 'annotation');
+console.log('\n=== what the app contributed ===');
+console.log(`  session.json app: ${JSON.stringify(app)}`);
+console.log(`  annotations: ${annotations.map((a) => a.name).join(', ') || '(none)'}`);
+
+// Marked during page bootstrap, long before Record. Only buffered replay gets it.
+if (app?.buildSha !== 'smoke-sha') {
+  console.error('FAIL: bugcast:session marked before recording did not reach session.json');
+  process.exitCode = 1;
+}
+// The same redactor that guards response bodies has to guard this too.
+if (typeof app?.apiKey === 'string' && app.apiKey.includes('sk-abcdefghij')) {
+  console.error('FAIL: an API key in an annotation reached disk unredacted');
+  process.exitCode = 1;
+}
+for (const name of ['boot', 'live-step', 'save-span']) {
+  if (!annotations.some((a) => a.name === name)) {
+    console.error(`FAIL: annotation "${name}" never reached the timeline`);
+    process.exitCode = 1;
+  }
+}
+// A measure has duration; a mark does not. The distinction is the contract.
+const span = annotations.find((a) => a.name === 'save-span');
+if (span && span.tEnd === undefined) {
+  console.error('FAIL: a performance.measure annotation lost its duration');
+  process.exitCode = 1;
+}
+
 console.log('\n=== written to disk ===');
 console.log((files ?? ['(nothing)']).map((f) => '  ' + f).join('\n'));
 // timeline.json holds events only now — speech is its own stream — so the

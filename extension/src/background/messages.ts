@@ -11,6 +11,8 @@ export const OFFSCREEN_STOP = 'bugcast/offscreen-stop';
 export const OFFSCREEN_STARTED = 'bugcast/offscreen-started';
 export const OFFSCREEN_ERROR = 'bugcast/offscreen-error';
 export const INTERACTION = 'bugcast/interaction';
+/** A `bugcast:`-prefixed User Timing entry harvested from the page. */
+export const ANNOTATION = 'bugcast/annotation';
 export const START_RECORDING = 'bugcast/start-recording';
 export const STOP_RECORDING = 'bugcast/stop-recording';
 export const RECORDING_STATE = 'bugcast/recording-state';

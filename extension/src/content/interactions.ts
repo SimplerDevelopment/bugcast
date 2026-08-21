@@ -16,7 +16,8 @@
 
 import { describeTarget, isInterestingKey } from '../lib/dom-target';
 import { describeValue, isSensitiveField } from '../lib/redact';
-import { INTERACTION } from '../background/messages';
+import { ANNOTATION, INTERACTION } from '../background/messages';
+import { fromEntry, MARK_PREFIX } from '../lib/annotate';
 
 /** Below this, a pointer gesture is a click that wobbled, not a drag. */
 const DRAG_THRESHOLD_PX = 5;
@@ -97,6 +98,67 @@ let alive = true;
       void chrome.runtime
         .sendMessage({ type: INTERACTION, kind, epochMs: Date.now(), ...payload })
         .catch(() => {});
+    } catch {
+      teardown();
+    }
+  };
+
+  /**
+   * Harvest what the application says about itself.
+   *
+   * `buffered: true` is load-bearing, not a nicety: this script is injected
+   * when the user presses Record, and the marks worth having — build SHA,
+   * release, route — were written during the page's own bootstrap, long before.
+   * Without buffered replay every one of them is already gone. Verified in
+   * `scripts/usertiming-probe.mjs` that an isolated world does receive them.
+   *
+   * Filtered by prefix in the observer rather than downstream, because a real
+   * application's timeline is mostly its own marks and its framework's, and
+   * none of that is ours to record.
+   */
+  const observeAnnotations = (): void => {
+    try {
+      const observer = new PerformanceObserver((list) => {
+        if (!alive) return;
+        for (const entry of list.getEntries()) {
+          if (!entry.name.startsWith(MARK_PREFIX)) continue;
+          // Capping happens here, before the value crosses sendMessage — a
+          // 10MB store must not be serialized and copied just to be trimmed on
+          // the other side.
+          const harvested = fromEntry(
+            {
+              name: entry.name,
+              entryType: entry.entryType,
+              startTime: entry.startTime,
+              duration: entry.duration,
+              detail: (entry as PerformanceMark).detail,
+            },
+            performance.timeOrigin,
+          );
+          if (harvested) sendAnnotation(harvested);
+        }
+      });
+      for (const type of ['mark', 'measure'] as const) {
+        // Separate observe() calls: a single call with two entry types is not
+        // supported alongside `buffered`, and losing the buffer loses the point.
+        try {
+          observer.observe({ type, buffered: true });
+        } catch {
+          // An engine without buffered support for this type still gets live
+          // entries from the other observe call. Degraded, not broken.
+        }
+      }
+    } catch {
+      // No PerformanceObserver, or the page replaced it. Annotations are
+      // strictly additive — their absence must never cost the recording.
+    }
+  };
+
+  const sendAnnotation = (h: ReturnType<typeof fromEntry>): void => {
+    if (!alive || !h) return;
+    if (contextGone()) return teardown();
+    try {
+      void chrome.runtime.sendMessage({ type: ANNOTATION, ...h }).catch(() => {});
     } catch {
       teardown();
     }
@@ -272,6 +334,10 @@ let alive = true;
   on('pointercancel', () => {
     pointer = null;
   });
+
+  // Last, so a page with an enormous performance timeline cannot delay
+  // interaction capture from going live.
+  observeAnnotations();
 })();
 
 /**

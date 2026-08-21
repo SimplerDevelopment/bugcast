@@ -180,6 +180,11 @@ function renderRow(e: TimelineEvent): string {
       return cell('focus', `\`${e.target.selector}\``);
     case 'marker':
       return cell('**mark**', `**${e.note}**`);
+    case 'annotation': {
+      const detail = e.detail === undefined ? '' : ` \`${JSON.stringify(e.detail)}\``;
+      const duration = e.tEnd !== undefined ? ` (${Math.round(e.tEnd - e.t)}ms)` : '';
+      return cell('app', `**${e.name}**${duration}${detail}`);
+    }
   }
 }
 

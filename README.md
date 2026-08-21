@@ -74,6 +74,42 @@ Right-click the icon → **Options**, or the **Settings** link in the popup.
 | **Sessions** | Where sessions are written |
 | **Shortcuts** | What actually bound, and how to change it |
 
+## Tell Bugcast about your app
+
+Bugcast records what the *browser* can see. Your project knows things it can't —
+which build this is, which route, which flags were on, what the store held when
+it broke.
+
+There is no SDK and nothing to install. Mark it with **standard User Timing**,
+which your app can call whether or not Bugcast exists:
+
+```js
+// A fact about the session. Lands in session.json. Last write wins.
+performance.mark('bugcast:session', {
+  detail: { buildSha: import.meta.env.VITE_COMMIT, release: '1.4.2' },
+});
+
+// A thing that happened. Lands in the timeline, on the same clock as
+// everything else, so it interleaves with the clicks and the failed request.
+performance.mark('bugcast:checkout-step', { detail: { step: 3, cart: 2 } });
+
+// A thing that took time. `performance.measure` carries duration.
+performance.measure('bugcast:save', { start, end, detail: { postId } });
+```
+
+Anything prefixed `bugcast:` is collected; everything else on your performance
+timeline is ignored. Mark at page load if you like — the observer replays
+entries created before recording started, so a build SHA marked during bootstrap
+is still captured when you press Record ten minutes later.
+
+**What happens to what you attach.** It is bounded before it leaves the page
+(depth 4, 64 keys or items, 1024 characters per string) and each limit leaves a
+distinct marker so an agent reading it knows *which* budget was hit rather than
+just that something is missing. Then it goes through the same redactor as
+response bodies — an `apiKey` in an annotation is treated exactly like an
+`apiKey` in a 500. Attaching your whole Redux store is not a good idea, but it
+will not blow up the artifact if you do.
+
 ## Hand a session to a coding agent
 
 Point it at `report.md` and you're done — that's the whole handoff, and it needs
@@ -119,7 +155,7 @@ human rather than a script to verify — see [`AGENTS.md`](AGENTS.md).
 ## Why the design notes are in the repo
 
 [`docs/design/`](docs/design/) holds the full decision record — a map plus
-thirteen resolved tickets. Not a tidied-up architecture doc: the actual
+fifteen resolved tickets. Not a tidied-up architecture doc: the actual
 reasoning, including **the alternatives that were rejected and the ones that
 turned out wrong.**
 
