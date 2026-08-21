@@ -105,6 +105,9 @@ manifest.host_permissions = ['<all_urls>'];
 fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
 
 const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bugcast-'));
+// A fixed-ish port for the browser-level CDP session used to grant activeTab.
+const CDP_PORT = 9600 + (process.pid % 300);
+
 // Playwright's bundled Chromium, not `channel: 'chrome'`. The system-Chrome
 // route launches but never registers the MV3 service worker within a sane
 // timeout, and chasing that is not worth a ~150MB download avoided:
@@ -114,7 +117,14 @@ let ctx;
 try {
   ctx = await chromium.launchPersistentContext(userDataDir, {
     headless: false,
-      args: [`--disable-extensions-except=${LOADED}`, `--load-extension=${LOADED}`],
+    args: [
+      `--disable-extensions-except=${LOADED}`,
+      `--load-extension=${LOADED}`,
+      // Extensions.triggerAction is a browser-domain command and Playwright's
+      // CDP sessions are page-scoped, so the browser endpoint has to be
+      // reachable separately. Playwright does honour this flag.
+      `--remote-debugging-port=${CDP_PORT}`,
+    ],
   });
 } catch (e) {
   console.error('Could not launch Chromium. Run `bunx playwright install chromium`.');
@@ -127,6 +137,71 @@ let [sw] = ctx.serviceWorkers();
 if (!sw) sw = await ctx.waitForEvent('serviceworker', { timeout: 15000 });
 const extId = new URL(sw.url()).host;
 console.log('extension id:', extId);
+
+/**
+ * Grant activeTab the way a toolbar click does.
+ *
+ * `chrome.tabCapture.getMediaStreamId` needs an activeTab grant, and this used
+ * to be the wall the harness could not climb: no automation produces a real
+ * toolbar-icon click, so the smoke ran with video disabled and the capture
+ * pipeline was exercised separately against a synthetic canvas+oscillator
+ * stream. Chrome's `Extensions` domain changes that — `triggerAction` enters
+ * Chromium's genuine ExecuteUserAction path, which grants tab permissions
+ * unconditionally (`kGrantTabPermissions = true`).
+ *
+ * Measured before it was relied on: scripts/tabcapture-probe.mjs, with the
+ * pre-click call asserted to fail first.
+ *
+ * Two things the protocol will not forgive:
+ *   - it must be a **tab** target, which is a distinct type from a page target
+ *     and does not appear in /json/list at all;
+ *   - the browser endpoint is a second CDP client, so it stays strictly on
+ *     browser-domain commands and never touches the page (see the note above
+ *     about chrome.debugger — one client per target).
+ */
+async function grantActiveTab(pageUrl) {
+  let version = null;
+  for (let i = 0; i < 20 && !version; i++) {
+    version = await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`)
+      .then((r) => r.json())
+      .catch(() => null);
+    if (!version) await new Promise((r) => setTimeout(r, 250));
+  }
+  if (!version) return `devtools endpoint never came up on ${CDP_PORT}`;
+  const ws = new WebSocket(version.webSocketDebuggerUrl);
+  await new Promise((resolve, reject) => {
+    ws.addEventListener('open', resolve, { once: true });
+    ws.addEventListener('error', reject, { once: true });
+  });
+  let id = 0;
+  const pending = new Map();
+  ws.addEventListener('message', (e) => {
+    const m = JSON.parse(e.data);
+    if (m.id !== undefined && pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id); }
+  });
+  const send = (method, params = {}) =>
+    new Promise((resolve, reject) => {
+      const n = ++id;
+      const timer = setTimeout(() => { pending.delete(n); reject(new Error(`${method} timed out`)); }, 10_000);
+      pending.set(n, (m) => { clearTimeout(timer); resolve(m); });
+      ws.send(JSON.stringify({ id: n, method, params }));
+    });
+
+  try {
+    const tabs = await send('Target.getTargets', { filter: [{ type: 'tab' }] });
+    const all = tabs.result?.targetInfos ?? [];
+    const tab = all.find((t) => t.url.startsWith(pageUrl));
+    if (!tab) {
+      return `no tab target for ${pageUrl} — saw ${JSON.stringify(all.map((t) => t.url))}`;
+    }
+    console.log(`  granting on tab target ${tab.targetId} (${tab.url})`);
+    console.log(`  tab targets present: ${all.length}`);
+    const out = await send('Extensions.triggerAction', { id: extId, targetId: tab.targetId });
+    return out.error ? out.error.message : null;
+  } finally {
+    ws.close();
+  }
+}
 
 // The page under test. Playwright attaches to it, which is the interesting
 // question: does chrome.debugger.attach conflict with an existing CDP client?
@@ -173,12 +248,43 @@ await ext.evaluate(async () => {
   });
 });
 
+// Immediately before Record, so the grant is fresh — activeTab is scoped to the
+// tab and revoked on navigation.
+// Focus the tab being recorded first. Chromium's ExecuteUserAction runs against
+// the window's active web contents, so granting while the extension page holds
+// focus grants on the wrong tab — which is exactly what the diagnostics showed:
+// the grant reported success on the right target id and tabCapture still
+// refused, because a different tab was active.
+await target.bringToFront();
+const grantError = await grantActiveTab(`http://localhost:${PORT}/`).catch((e) => e.message);
+console.log(`activeTab via Extensions.triggerAction: ${grantError ?? 'granted'}`);
+const activeNow = await sw.evaluate(async () => {
+  const [t] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return t?.id ?? null;
+});
+console.log(`  worker sees active tab ${activeNow}; recording tabId ${tabId}`);
+
 const started = await ext.evaluate(
   ([type, tabId, pageUrl, title]) => chrome.runtime.sendMessage({ type, tabId, pageUrl, title }),
   ['bugcast/start-recording', tabId, `http://localhost:${PORT}/`, 'bugcast smoke'],
 );
 console.log('start ->', JSON.stringify(started));
 if (started?.captureError) console.log('capture error:', started.captureError);
+// The whole point of the grant. A capture error here means tabCapture was
+// refused, which before this was the harness's permanent condition — so it is
+// now a regression, not a known limitation.
+if (!grantError && started?.captureError) {
+  console.error('FAIL: activeTab was granted and tabCapture still refused —', started.captureError);
+  process.exitCode = 1;
+}
+// What is asserted is that capture STARTS. What is not asserted, deliberately,
+// is how many bytes come out of it: tabCapture is paint-driven, so a tab that
+// is not painting delivers no frames, and this harness moves focus around. Two
+// consecutive runs produced 14187 bytes and 0 bytes with no code change between
+// them. Failing on byte count would buy a flaky suite in exchange for nothing —
+// the grant is the deterministic part and the grant is what this tests. The
+// zero-byte case is reported below so it stays visible rather than silent.
+// (docs/design/map.md: "tabCapture frame cadence on a static page" is open.)
 if (started?.error) {
   console.log('\nATTACH REFUSED (this is the refuse-to-start path working):', started.error);
   await ctx.close(); server.close(); process.exit(0);
@@ -301,10 +407,12 @@ const stopped = await ext.evaluate(
 console.log('\n=== report.md (first 40 lines) ===');
 console.log((stopped.report ?? '(none)').split('\n').slice(0, 40).join('\n'));
 
-// tabCapture needs an activeTab grant only a real toolbar click can produce,
-// so drive the real pipeline with a synthetic stream instead: a canvas for
-// video, an oscillator for audio. Proves the worklet loads, the tee wires up,
-// MediaRecorder produces bytes, and PCM comes out the tap.
+// This block no longer substitutes for tabCapture — the session above records
+// real video now, via the Extensions.triggerAction grant. It stays for the one
+// thing the real path exercises but does not assert: the 48k→16k decimation
+// ratio, plus the worklet loading and the tee wiring up. A synthetic canvas and
+// oscillator give exact, known input, which is what makes asserting a ratio
+// meaningful; the real capture's PCM length depends on how long the page took.
 // The self-test is reachable from any extension page, so the harness can run
 // the real thing. No folder is chosen here, so `disk` is expected to fail —
 // which is itself worth asserting: the failure has to name what to do.
@@ -531,6 +639,13 @@ if ((scripts ?? []).some((s) => s.url.startsWith('chrome-extension://'))) {
 
 console.log('\n=== written to disk ===');
 console.log((files ?? ['(nothing)']).map((f) => '  ' + f).join('\n'));
+
+// Visible, not fatal — see the note above the capture assertion.
+const videoLine = (files ?? []).find((f) => f.startsWith('video.webm'));
+if (videoLine?.includes('(0 bytes)')) {
+  console.log('\n  note: video.webm is empty. Capture started (that is asserted); tabCapture is');
+  console.log('  paint-driven and this run\'s tab produced no frames. Not a failure here.');
+}
 // timeline.json holds events only now — speech is its own stream — so the
 // stream and the timeline should still agree on the non-speech events.
 // The stream and the timeline must contain the same events. They diverged once —
