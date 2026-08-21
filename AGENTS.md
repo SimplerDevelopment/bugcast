@@ -119,6 +119,15 @@ Every one of these was found the expensive way. Do not rediscover them.
   is reading from.
 - **`chrome.tabCapture.getMediaStreamId` needs an `activeTab` grant** that only a
   real toolbar-icon click produces. Host permissions do not substitute.
+- **The MCP SDK version silently controls whether the channel exists.** On
+  Claude Code's v2 runtime (default from v2.1.232), a channel server negotiating
+  MCP protocol revision `2026-07-28` is not registered as a channel at all — no
+  error, no warning, push simply stops. `mcp/` is protected only by accident: it
+  is plain ESM on an older SDK and still speaks the legacy handshake. **Bumping
+  `@modelcontextprotocol/sdk` can break push with nothing in the diff that looks
+  related**, so verify a push still arrives after any bump. The documented
+  workaround is process-wide and would downgrade every other server the user
+  has.
 - **transformers.js fetches its ONNX wasm runtime from a CDN** unless
   `env.backends.onnx.wasm.wasmPaths` points at local files — a network call in
   the middle of a tool whose premise is that it runs locally. `scripts/copy-ort.mjs`

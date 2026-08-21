@@ -8,7 +8,20 @@
  *   claude --dangerously-load-development-channels bugcast
  *
  * (`--channels` once a server is on the approved allowlist; both flags are
- * hidden from --help.)
+ * hidden from --help. Getting onto that allowlist is not something this repo can
+ * do — see mcp/README.md — so treat the channel as an extra, never as the live
+ * story. `session_tail` is the surface that needs no flag.)
+ *
+ * ⚠️ **The MCP SDK version is load-bearing here.** On Claude Code's v2 runtime
+ * (default from v2.1.232) a channel server that negotiates MCP protocol revision
+ * 2026-07-28 cannot deliver channel messages, so Claude Code does not register
+ * it as a channel **at all** — silently, with no error at either end. This
+ * server is currently protected by accident: it is plain ESM on an older SDK and
+ * still speaks the legacy handshake. Bumping @modelcontextprotocol/sdk can
+ * therefore break push with nothing in the diff that looks related. The
+ * documented workaround, MCP_PROTOCOL_NEGOTIATION=legacy, is process-wide and
+ * would downgrade every other server the user has, so it is not shippable.
+ * Verify a push still arrives after any SDK bump.
  *
  * **This filters hard, on purpose.** A recording produces hundreds of events —
  * every click, every request, every navigation — and waking an agent for each

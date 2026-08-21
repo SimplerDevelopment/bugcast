@@ -53,8 +53,11 @@ call per burst of activity instead of one per interval. Polling's real cost is
 not latency — it is that every empty check leaves a tool call and its result in
 the agent's context.
 
-Capped at 30s so a call cannot be held open indefinitely. A finished session
-returns immediately; there is nothing more to wait for.
+Up to 30s is safe from anywhere. Above that — the ceiling is 110s — is for a
+loop in the **main conversation**, where Claude Code turns a call still running
+at two minutes into a background task and carries on. A subagent or a headless
+run gets no such rescue and blocks for the whole wait, so keep those at 30s. A
+finished session returns immediately; there is nothing more to wait for.
 
 Speech events flagged `provisional: true` come from a rolling ~10s window during
 recording. They are **replaced** by the authoritative full-audio transcript when
@@ -66,7 +69,7 @@ which is sampled inside `MediaRecorder.start()`, so event time *is* video time:
 say "watch from 02:14.320", or ask `session_frame` for that moment. Nothing
 needs to decode the recording.
 
-## Being told instead of asking
+## Being told instead of asking (experimental)
 
 Claude Code can register this server as a **channel**, so a recording pushes into
 a running session and the agent reacts without you typing anything:
@@ -74,6 +77,24 @@ a running session and the agent reacts without you typing anything:
 ```bash
 claude --dangerously-load-development-channels bugcast
 ```
+
+**Start with `session_tail` above, not this.** The flag is not decoration and it
+is not a formality we expect to drop: `--channels` accepts only plugins on an
+allowlist Anthropic curates, and the two documented ways onto it are a partner
+listing, which a repo cannot ship, and a Team/Enterprise `allowedChannelPlugins`
+setting that *replaces* the default list rather than extending it and names a
+plugin plus a marketplace — so a bare `server:bugcast` entry cannot be
+allowlisted at all, and none of it helps on Pro, Max, or no org.
+
+Channels are a research preview whose "protocol contract may change based on
+feedback", and neither flag appears in `claude --help`. So: a real thing that
+really works, worth using if you are willing to type the flag, and never
+something to build a workflow on. The follow-loop needs no flag and no
+permission.
+
+If nothing arrives, look at stderr — a failed push warns once there, because
+Claude Code acknowledges nothing and returns no error when a server is not
+loaded as a channel.
 
 What gets pushed is deliberately almost nothing — only what a person would
 interrupt you for:
