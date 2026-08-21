@@ -5,9 +5,18 @@ coding agent — including **while they are still being recorded**.
 
 ## Setup, once, for every project
 
+**Not on npm yet**, so this runs from a clone rather than `npx`:
+
 ```bash
-claude mcp add --scope user bugcast -- npx -y bugcast
+git clone https://github.com/SimplerDevelopment/bugcast
+cd bugcast/mcp && npm install          # one dependency, no build step
+claude mcp add --scope user bugcast -- node "$PWD/src/index.mjs"
 ```
+
+`npm install` is not optional — a clone has no `node_modules`, and without it
+the server exits on a missing `@modelcontextprotocol/sdk` before Claude ever
+speaks to it. There is no build step: the source runs as-is. Once it's published
+the whole thing collapses back to `npx -y bugcast` and nothing else changes.
 
 `--scope user` is the point: registered once, available in every project you
 open, with nothing to add per-repo.
@@ -16,8 +25,8 @@ No `--dir` needed if you point the extension at **`~/bugcast-sessions`**, which
 is what this server reads by default. The path cannot be discovered
 automatically — the File System Access API never exposes an absolute path, so
 the extension does not know it either — so the two ends agree by convention
-instead. Somewhere else is fine: `npx -y bugcast --dir /path/to/sessions`, or set
-`BUGCAST_DIR`.
+instead. Somewhere else is fine — append `--dir /path/to/sessions` to the
+command above, or set `BUGCAST_DIR`.
 
 The directory is created if it does not exist. An empty one is a correct answer
 to "what sessions exist", not a reason to fail on the first run.

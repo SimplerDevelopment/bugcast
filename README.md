@@ -117,11 +117,15 @@ nothing installed.
 
 For longer sessions — where the raw timeline runs to tens of thousands of tokens
 — there's an optional read-only MCP server, registered once for every project
-you ever open:
+you ever open. **It isn't on npm yet**, so point it at a clone:
 
 ```bash
-claude mcp add --scope user bugcast -- npx -y bugcast
+git clone https://github.com/SimplerDevelopment/bugcast
+cd bugcast/mcp && npm install          # one dependency, no build step
+claude mcp add --scope user bugcast -- node "$PWD/src/index.mjs"
 ```
+
+Once it's published this collapses back to `npx -y bugcast`.
 
 Point the extension at `~/bugcast-sessions` and no path configuration is needed
 at either end.
