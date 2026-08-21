@@ -8,6 +8,7 @@ import { sessionId, storedSessionDirectory, writeFile } from '../lib/session-sto
 import { renderReport } from '../lib/report';
 import { pageUrlResolver, toSpeechEvents, toSrt, type Segment } from '../lib/srt';
 import { planFrames } from '../lib/frames';
+import { dedupe, fromScriptParsed, type ScriptEntry } from '../lib/scripts';
 import { runChecks, type Check } from '../lib/self-test';
 import { loadSettings } from '../lib/settings';
 import type { RedactionSummary } from '../lib/redact';
@@ -61,6 +62,13 @@ interface Recording {
    * fact about the session.
    */
   app: Record<string, unknown> | null;
+  /**
+   * Every script the page loaded, with its sourceMapURL.
+   *
+   * Not events: a script is not a thing that happened at a moment, and putting
+   * these in the timeline would bury what an agent is actually reading.
+   */
+  scripts: ScriptEntry[];
   /**
    * Where the session began. Held separately because `ctx.pageUrl` is *current*
    * page context and navigation mutates it — reading it at stop time reported
@@ -147,6 +155,9 @@ async function start(
    * session, which the disk smoke caught by comparing counts.
    */
   const beforeActive: string[] = [];
+  // scriptParsed replays the instant the domain is enabled, which is before
+  // `active` exists — the same hand-over the event stream already needs.
+  const beforeActiveScripts: ScriptEntry[] = [];
   const record = (event: TimelineEvent): void => {
     events.push(event);
     if (active) queueLine(JSON.stringify(event));
@@ -188,6 +199,14 @@ async function start(
 
   new NetworkCapture(cdp, ctx).start();
   new PageCapture(cdp, ctx).start();
+
+  // Replayed for everything already loaded the moment Debugger.enable lands, so
+  // this catches the bundle even though recording starts long after the page did.
+  cdp.on('Debugger.scriptParsed', (p) => {
+    const entry = fromScriptParsed(p);
+    if (entry && active) active.scripts.push(entry);
+    else if (entry) beforeActiveScripts.push(entry);
+  });
   await injectInteractionCapture(tab.id);
 
   // Recording almost always starts on an already-loaded page, so
@@ -217,6 +236,7 @@ async function start(
     title: title || tab.title || tab.url || 'Session',
     startUrl: ctx.pageUrl,
     app: null,
+    scripts: [...beforeActiveScripts],
     id,
     video: Boolean(capture),
   };
@@ -242,7 +262,7 @@ async function start(
 
 async function stop(): Promise<Response> {
   if (!active) return { ok: true, recording: false };
-  const { cdp, events, startedAt, redactor, title, startUrl, id, video, app } = active;
+  const { cdp, events, startedAt, redactor, title, startUrl, id, video, app, scripts } = active;
   await chrome.storage.local.set({ recording: false });
   clearInterval(active.awake);
   await flushEvents();
@@ -313,7 +333,7 @@ async function stop(): Promise<Response> {
   let report = '';
   try {
     report = renderSessionReport(id, title, startedAt, startUrl, events, redaction);
-    const files = sessionFiles(id, startedAt, startUrl, events, redaction, report, videoOnDisk, segments, frames.written, app);
+    const files = sessionFiles(id, startedAt, startUrl, events, redaction, report, videoOnDisk, segments, frames.written, app, dedupe(scripts));
     if (hasFolder) {
       try {
         written = await writeSession(id, files);
@@ -411,6 +431,8 @@ function sessionFiles(
   frameCount: number,
   /** What the page contributed via `bugcast:session`. Absent when it said nothing. */
   app: Record<string, unknown> | null,
+  /** One entry per script URL, for resolving a minified frame at read time. */
+  scripts: ScriptEntry[],
 ): Array<[string, string]> {
   const durationMs = durationOf(events);
 
@@ -449,6 +471,16 @@ function sessionFiles(
           frames: frameCount
             ? { enabled: true, dir: 'frames/', count: frameCount, longEdge: 1280 }
             : { enabled: false },
+          // Declared false rather than omitted: an agent must be able to tell
+          // "this page shipped no source maps" from "this build did not index them".
+          scripts: scripts.length
+            ? {
+                enabled: true,
+                file: 'scripts.json',
+                count: scripts.length,
+                withSourceMaps: scripts.filter((s) => s.sourceMapURL || s.inlineMap).length,
+              }
+            : { enabled: false },
         },
         redaction: {
           typedValues: 'off',
@@ -465,6 +497,7 @@ function sessionFiles(
           ...(video ? { video: 'video.webm' } : {}),
           ...(segments.length ? { transcript: 'transcript.srt' } : {}),
           ...(frameCount ? { frames: 'frames/' } : {}),
+          ...(scripts.length ? { scripts: 'scripts.json' } : {}),
         },
       },
     null,
@@ -473,6 +506,16 @@ function sessionFiles(
 
   return [
     ['session.json', manifest],
+    // Its own file rather than a session.json block: a real app ships dozens of
+    // chunks, and the manifest is meant to stay readable at a glance.
+    ...(scripts.length
+      ? ([
+          [
+            'scripts.json',
+            JSON.stringify({ schemaVersion: SCHEMA_VERSION, sessionId: id, scripts }, null, 2),
+          ],
+        ] as Array<[string, string]>)
+      : []),
     [
       'timeline.json',
       JSON.stringify(

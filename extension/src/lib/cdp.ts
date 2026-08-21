@@ -71,6 +71,19 @@ export class CdpSession {
     await this.send('Log.enable');
     await this.send('Page.enable');
 
+    // Debugger earns its place for exactly one thing: scriptParsed replays every
+    // already-loaded script with its sourceMapURL, which is what lets an agent
+    // turn `bundle.js:1:38402` into a real file in the checkout it is sitting in.
+    //
+    // It is the one domain here that puts V8 into debug mode, so it was measured
+    // before being added rather than after: no measurable cost above the domains
+    // above, n=25, in a harness that is not itself a debugger on the page
+    // (scripts/debugger-cost-cleanroom.mjs). Best-effort — a session without a
+    // script index is still a complete session, which is not true of the others.
+    await this.send('Debugger.enable').catch((e) => {
+      console.warn('[bugcast] no script index this session', e);
+    });
+
     // Service-worker traffic is invisible without this — the spike saw only the
     // document URL, not even /sw.js. Child targets then need their own
     // Network.enable, which `Target.attachedToTarget` below drives.

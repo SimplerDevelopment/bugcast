@@ -42,6 +42,7 @@ const server = http.createServer((req, res) => {
         <div id="palette" draggable="true" style="width:80px;height:40px">Testimonial</div>
         <div id="canvas" style="width:300px;height:200px">Canvas</div>
       </main>
+      <script src="/bundle.js"></script>
       <script>
         // Marked during the page's own bootstrap, BEFORE recording starts. The
         // only way these reach the artifact is PerformanceObserver's buffered
@@ -52,6 +53,13 @@ const server = http.createServer((req, res) => {
         });
         performance.mark('bugcast:boot', { detail: { phase: 'load' } });
       <\/script>`);
+  } else if (url.pathname === '/bundle.js') {
+    // A stand-in for the developer's build output. The sourceMappingURL comment
+    // is the whole point: without a script here that has one, the index
+    // assertion below would pass on the page's own inline <script> and never
+    // notice if sourceMapURL capture broke.
+    res.writeHead(200, { 'content-type': 'application/javascript' });
+    res.end('window.__bundle = (x) => x + 1;\n//# sourceMappingURL=bundle.js.map\n');
   } else if (url.pathname === '/ok') {
     res.writeHead(200, { ...cors, 'content-type': 'application/json' });
     res.end('{"ok":true}');
@@ -483,6 +491,41 @@ for (const name of ['boot', 'live-step', 'save-span']) {
 const span = annotations.find((a) => a.name === 'save-span');
 if (span && span.tEnd === undefined) {
   console.error('FAIL: a performance.measure annotation lost its duration');
+  process.exitCode = 1;
+}
+
+// The script index. scriptParsed replays for already-loaded scripts when the
+// Debugger domain is enabled — the smoke page loads its scripts long before
+// recording starts, so if the replay ever stops working this is what catches it.
+const scripts = await ext.evaluate(async (id) => {
+  const opfs = await navigator.storage.getDirectory();
+  const dir = await opfs.getDirectoryHandle('sessions');
+  const folder = await dir.getDirectoryHandle(id).catch(() => null);
+  if (!folder) return null;
+  const f = await folder.getFileHandle('scripts.json').catch(() => null);
+  if (!f) return null;
+  return JSON.parse(await (await f.getFile()).text()).scripts ?? [];
+}, stopped.sessionId);
+
+console.log('\n=== script index ===');
+console.log(`  ${scripts?.length ?? 0} scripts, ${(scripts ?? []).filter((s) => s.sourceMapURL || s.inlineMap).length} with a source map`);
+if (!scripts?.length) {
+  console.error('FAIL: no script index — Debugger.scriptParsed did not replay');
+  process.exitCode = 1;
+}
+// The page loads /bundle.js long before recording starts, so this asserts the
+// replay *and* that sourceMapURL survives it — the reason the domain is on.
+const bundle = (scripts ?? []).find((s) => s.url.endsWith('/bundle.js'));
+if (!bundle) {
+  console.error('FAIL: /bundle.js was loaded before recording and is not in the index');
+  process.exitCode = 1;
+} else if (bundle.sourceMapURL !== 'bundle.js.map') {
+  console.error(`FAIL: sourceMapURL not captured (got ${JSON.stringify(bundle.sourceMapURL)})`);
+  process.exitCode = 1;
+}
+// Our own content script must never be in the developer's index.
+if ((scripts ?? []).some((s) => s.url.startsWith('chrome-extension://'))) {
+  console.error('FAIL: the script index contains the extension\'s own scripts');
   process.exitCode = 1;
 }
 
