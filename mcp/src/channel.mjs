@@ -18,9 +18,16 @@
  */
 
 import path from 'node:path';
-import { isLive, listSessionIds, tailEvents } from './sessions.mjs';
+import { isLive, listSessionIds, tailEvents, waitForChange } from './sessions.mjs';
 
-/** How often to look for new events. Cheap: a read of an append-only file. */
+/**
+ * How long to sit on the watcher before re-reading anyway.
+ *
+ * Not a poll interval — the watch below is what actually wakes this. It is the
+ * backstop for the two things `fs.watch` will not tell you: a *different*
+ * session starting while we are watching this one's folder, and a network
+ * filesystem where the watch silently never fires.
+ */
 const POLL_MS = 2_000;
 
 /**
@@ -84,6 +91,7 @@ export function startChannel(server, root, { pollMs = POLL_MS } = {}) {
   let following = null;
   let cursor = 0;
   let stopped = false;
+  let warnedAboutPush = false;
 
   const push = async (content, meta) => {
     try {
@@ -91,9 +99,20 @@ export function startChannel(server, root, { pollMs = POLL_MS } = {}) {
         method: 'notifications/claude/channel',
         params: { content, meta },
       });
-    } catch {
-      // The client did not register this server as a channel, or has gone away.
-      // Neither is a reason to stop serving tools.
+    } catch (error) {
+      // Still not a reason to stop serving tools — but not a reason to say
+      // nothing either. Swallowed entirely, an unregistered channel is
+      // indistinguishable from a recording that produced nothing worth
+      // reporting: both are silence, and the silence reads as lag. Once, on
+      // stderr, because stdout is the transport.
+      if (!warnedAboutPush) {
+        warnedAboutPush = true;
+        console.error(
+          `[bugcast] channel push failed: ${error?.message ?? error}\n` +
+            '[bugcast] nothing will be pushed to this client. If that is not intended, relaunch\n' +
+            '[bugcast] with: claude --dangerously-load-development-channels bugcast',
+        );
+      }
     }
   };
 
@@ -137,13 +156,22 @@ export function startChannel(server, root, { pollMs = POLL_MS } = {}) {
     }
   };
 
-  const timer = setInterval(() => void tick(), pollMs);
-  // Never hold the process open on this alone.
-  timer.unref?.();
+  // Watch, do not poll. The read itself is cheap, but a fixed interval put up
+  // to `pollMs` of latency in front of every event for nothing — and an error
+  // the tester is watching for is exactly the moment that lag is felt. The
+  // watcher already exists; `session_tail` waits on the same one.
+  void (async () => {
+    while (!stopped) {
+      await tick();
+      if (stopped) return;
+      // `following` is null between sessions, and `path.join(root, '.')` is
+      // `root` — so the idle case watches the folder a new session appears in.
+      await waitForChange(root, following ?? '.', pollMs, { unref: true });
+    }
+  })();
 
   return () => {
     stopped = true;
-    clearInterval(timer);
   };
 }
 

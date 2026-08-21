@@ -181,8 +181,10 @@ export const MAX_WAIT_MS = 30_000;
  * The watch is on the *directory*, not the file: events.ndjson may not exist yet
  * when an agent starts following a session that is only just beginning, and you
  * cannot watch a file that is not there.
+ *
+ * `{ unref: true }` waits without keeping the process alive — see below.
  */
-export function waitForChange(root, id, ms) {
+export function waitForChange(root, id, ms, { unref = false } = {}) {
   const deadline = Math.min(Math.max(ms | 0, 0), MAX_WAIT_MS);
   if (!deadline) return Promise.resolve(false);
 
@@ -200,8 +202,14 @@ export function waitForChange(root, id, ms) {
     };
 
     timer = setTimeout(() => done(false), deadline);
+    // `unref` is for the channel, which waits on this in a loop for the life of
+    // the server and must not be the reason the process stays up. Off by
+    // default: a tool call has nothing else holding the loop open, so unref'd
+    // handles would let node exit with the promise still pending.
+    if (unref) timer.unref?.();
     try {
       watcher = watch(path.join(root, id), () => done(true));
+      if (unref) watcher.unref?.();
     } catch {
       // No directory to watch yet. The timeout still applies, so the caller
       // waits and re-reads rather than spinning.
