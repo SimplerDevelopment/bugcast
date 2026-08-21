@@ -59,7 +59,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import crypto from 'node:crypto';
 
 const ROUNDS = Number(process.env.ROUNDS ?? 12);
 
@@ -98,22 +97,20 @@ const manifest = JSON.parse(fs.readFileSync(path.join(LOADED, 'manifest.json'), 
 manifest.host_permissions = ['<all_urls>'];
 fs.writeFileSync(path.join(LOADED, 'manifest.json'), JSON.stringify(manifest, null, 2));
 
-// Chrome derives an unpacked extension's id from its absolute path, so we can
-// compute ours rather than guess which service worker is which. The first run of
-// this harness attached to a Chrome *component* extension's worker — the first
-// service_worker target in the list — and failed with `chrome.scripting` being
-// undefined, which is a confusing way to learn you are inside someone else's
-// extension. realpath because Chrome resolves /var -> /private/var on macOS and
-// hashes what it resolved.
+// The extension id comes from the browser, not from arithmetic.
+//
+// This used to derive it by hashing the absolute path — Chrome's own scheme for
+// unpacked extensions, sha256 then a hex→a-p mapping — because nothing better
+// was available. It worked, but it is a reimplementation of an internal detail,
+// and it only existed because the obvious alternative (take the first
+// service_worker target in /json/list) grabs a Chrome *component* extension and
+// fails later with `chrome.scripting` undefined, which is a confusing way to
+// learn you are inside someone else's extension.
+//
+// `Extensions.loadUnpacked` returns the id from the real ExtensionRegistry, so
+// both the arithmetic and the trap go away. See scripts/tabcapture-probe.mjs,
+// where the same command is used.
 const EXT_PATH = fs.realpathSync(LOADED);
-const EXT_ID = crypto
-  .createHash('sha256')
-  .update(EXT_PATH)
-  .digest('hex')
-  .slice(0, 32)
-  .split('')
-  .map((c) => String.fromCharCode(97 + parseInt(c, 16)))
-  .join('');
 
 const PROFILE = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-clean-'));
 const PORT = 9333 + (process.pid % 500);
@@ -123,8 +120,8 @@ const PORT = 9333 + (process.pid % 500);
 const child = spawn(chromium.executablePath(), [
   `--remote-debugging-port=${PORT}`,
   `--user-data-dir=${PROFILE}`,
-  `--disable-extensions-except=${EXT_PATH}`,
-  `--load-extension=${EXT_PATH}`,
+  // No --load-extension: Extensions.loadUnpacked installs it below and hands
+  // back the id, which is the point.
   '--no-first-run',
   '--no-default-browser-check',
   '--disable-background-timer-throttling',
@@ -138,7 +135,39 @@ async function targets() {
   return res ? res.json() : [];
 }
 
-// Wait for OUR service worker — matched by id, not by being the first one.
+// Install through the protocol, and take the id it returns.
+// The endpoint is not up the instant spawn() returns, so wait for it rather
+// than racing it — an ECONNREFUSED here reads as "the domain is missing".
+let browserInfo = null;
+for (let i = 0; i < 40 && !browserInfo; i++) {
+  await sleep(500);
+  browserInfo = await fetch(`http://127.0.0.1:${PORT}/json/version`)
+    .then((r) => r.json())
+    .catch(() => null);
+}
+if (!browserInfo) {
+  console.error('FAIL: devtools endpoint never came up');
+  child.kill(); server.close(); process.exit(1);
+}
+const browserWs = new WebSocket(browserInfo.webSocketDebuggerUrl);
+await new Promise((resolve, reject) => {
+  browserWs.addEventListener('open', resolve, { once: true });
+  browserWs.addEventListener('error', reject, { once: true });
+});
+const EXT_ID = await new Promise((resolve, reject) => {
+  const timer = setTimeout(() => reject(new Error('Extensions.loadUnpacked timed out')), 20_000);
+  browserWs.addEventListener('message', (e) => {
+    const m = JSON.parse(e.data);
+    if (m.id !== 1) return;
+    clearTimeout(timer);
+    if (m.error) reject(new Error(m.error.message));
+    else resolve(m.result.id);
+  });
+  browserWs.send(JSON.stringify({ id: 1, method: 'Extensions.loadUnpacked', params: { path: EXT_PATH } }));
+});
+browserWs.close();
+
+// Wait for OUR service worker — matched by the id the browser gave us.
 // MV3 workers are lazy and suspend when idle, so if it is not there we wake it
 // by opening one of the extension's own pages and look again.
 let sw = null;
@@ -207,23 +236,33 @@ const send = (method, params = {}) =>
 // case it accepts the connection and then executes nothing — which looks exactly
 // like a hang. Runtime.enable plus runIfWaitingForDebugger is the incantation
 // that releases it; both are harmless if it was already running.
-await send('Runtime.enable').catch(() => {});
-await send('Runtime.runIfWaitingForDebugger').catch(() => {});
-
-// Prove the worker actually executes before asking it to do anything real,
-// so a failure names the right cause instead of blaming chrome.tabs.create.
-{
+// Prove the worker executes before asking it to do anything real, so a failure
+// names the right cause instead of blaming chrome.tabs.create.
+//
+// Retried, not asked once. Two separate reasons, and the second only appeared
+// after switching to Extensions.loadUnpacked: a freshly-woken worker can sit
+// paused for a debugger and execute nothing (which looks exactly like a hang),
+// and a freshly *installed* worker can exist as a target before its chrome.*
+// bindings are attached. A single check caught the first and flaked on the
+// second — `NO (no chrome.tabs)` on one run and `yes` on the next, same code.
+let ok = false;
+let lastError = null;
+for (let attempt = 0; attempt < 20 && !ok; attempt++) {
+  await send('Runtime.runIfWaitingForDebugger').catch(() => {});
+  await send('Runtime.enable').catch(() => {});
   const alive = await send('Runtime.evaluate', {
     expression: 'typeof chrome?.tabs?.create === "function"',
     returnByValue: true,
   }).catch((e) => ({ error: e.message }));
-  const ok = alive?.result?.result?.value === true;
-  console.log(`worker responsive: ${ok ? 'yes' : `NO (${alive?.error ?? 'no chrome.tabs'})`}`);
-  if (!ok) {
-    console.error('FAIL: the worker is attached but not executing, or lacks the tabs API.');
-    ws.close(); child.kill(); server.close();
-    process.exit(1);
-  }
+  ok = alive?.result?.result?.value === true;
+  lastError = alive?.error ?? null;
+  if (!ok) await sleep(1000);
+}
+console.log(`worker responsive: ${ok ? 'yes' : `NO (${lastError ?? 'no chrome.tabs after 20s'})`}`);
+if (!ok) {
+  console.error('FAIL: the worker is attached but not executing, or lacks the tabs API.');
+  ws.close(); child.kill(); server.close();
+  process.exit(1);
 }
 
 /** Run an async expression inside the service worker and return its value. */
@@ -277,8 +316,26 @@ try {
     for (const [label, domains] of order) {
       const out = await inWorker(`
         const tabId = ${tabId};
-        await chrome.tabs.reload(tabId);
-        await new Promise((r) => setTimeout(r, 1200));
+        // Wait for the load to COMPLETE, not for a guessed interval. A fixed
+        // sleep raced the reload and executeScript hit "Frame with ID 0 was
+        // removed" — the frame is torn down and rebuilt, and 1200ms only
+        // usually beat it.
+        await new Promise((resolve) => {
+          const onUpdated = (id, info) => {
+            if (id !== tabId || info.status !== 'complete') return;
+            chrome.tabs.onUpdated.removeListener(onUpdated);
+            resolve();
+          };
+          chrome.tabs.onUpdated.addListener(onUpdated);
+          chrome.tabs.reload(tabId);
+          // Backstop: a reload that never reports complete must not wedge the run.
+          setTimeout(() => {
+            chrome.tabs.onUpdated.removeListener(onUpdated);
+            resolve();
+          }, 8000);
+        });
+        // Modules still need a beat after 'complete' to parse and run.
+        await new Promise((r) => setTimeout(r, 300));
 
         let scripts = 0, withMaps = 0, enableMs = 0;
         const domains = ${JSON.stringify(domains)};
