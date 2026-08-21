@@ -9,7 +9,9 @@
   },
   "files": [
     "src",
-    "README.md"
+    "!src/*.test.mjs",
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=20"
