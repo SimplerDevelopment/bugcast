@@ -142,6 +142,29 @@ obvious: speech offsets are derived from the audio sample position
 transcriber can run arbitrarily far behind without the timeline drifting, and
 audio and video share `t0` at `MediaRecorder.start()`.
 
+### Sharing only the clock
+
+Asked directly whether the two pipelines were fully independent, the honest
+answer was "mostly", and the three exceptions were worth removing:
+
+- `active.events` was one array holding both, filtered apart at stop.
+- Live narration crossed into the worker as a message and went through the same
+  listener and the same `recordEvent` as interactions.
+- Window slicing ran on the capture thread: `pcm.reduce(...)` over a chunk list
+  that grows for the whole session (~14,000 chunks after fifteen minutes),
+  walked every two seconds, alongside `MediaRecorder` and the AudioWorklet.
+
+Now the offscreen document owns `speech.ndjson` end to end and writes it itself.
+No message traffic, no shared array, no shared write queue. Consumed audio
+chunks are dropped as they are transcribed, so the live pass never rescans the
+session — the authoritative pass at stop reads the recording back rather than
+relying on that buffer.
+
+What remains shared is exactly the clock, which is the point: `t` is measured
+from `t0` at `MediaRecorder.start()` on both sides, and speech offsets come from
+the audio sample position rather than from when inference finished. Merging on
+`t` is exact without the pipelines ever touching.
+
 ### Consequences
 
 - **09** — `events.ndjson` becomes the source; `timeline.json` joins

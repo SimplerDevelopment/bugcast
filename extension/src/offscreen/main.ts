@@ -21,7 +21,7 @@
  */
 
 import { idbGet } from '../lib/idb';
-import { cleanSegments } from '../lib/srt';
+import { cleanSegments, toSpeechEvents } from '../lib/srt';
 import type { PlannedFrame } from '../lib/frames';
 import { extractFrames } from './frames';
 import { DEFAULT_TIER, DEVICE, transformersEngine, type ModelTier } from './transcribe';
@@ -32,7 +32,6 @@ import {
   tabStreamConstraints,
 } from '../lib/recorder';
 import {
-  LIVE_SPEECH,
   OFFSCREEN_ERROR,
   OFFSCREEN_FLUSH_VIDEO,
   OFFSCREEN_FRAMES,
@@ -90,9 +89,46 @@ let tier: ModelTier = DEFAULT_TIER;
  */
 const LIVE_WINDOW_SAMPLES = 16_000 * 10;
 
-/** Samples already sent to the live pass. */
+/** Samples already sent to the live pass, counted from the start of the session. */
 let liveOffset = 0;
 let liveBusy = false;
+
+/**
+ * speech.ndjson, owned here rather than by the worker.
+ *
+ * Narration used to travel to the service worker as a message and be written
+ * alongside events. Owning the file here means the two pipelines share nothing
+ * but the clock: no message traffic, no shared array, no shared write queue.
+ */
+let speechStream: { file: FileSystemFileHandle; bytes: number } | null = null;
+let speechWrites: Promise<void> = Promise.resolve();
+
+function appendSpeech(lines: string[]): void {
+  if (!speechStream || !lines.length) return;
+  const batch = lines.join('\n') + '\n';
+  speechWrites = speechWrites.then(async () => {
+    try {
+      const w = await speechStream!.file.createWritable({ keepExistingData: true });
+      await w.seek(speechStream!.bytes);
+      await w.write(batch);
+      await w.close();
+      speechStream!.bytes += new TextEncoder().encode(batch).length;
+    } catch {
+      // A failed narration write costs narration. Capture is unaffected, which
+      // is the entire point of keeping these apart.
+    }
+  });
+}
+
+/**
+ * Samples consumed and discarded, so the live pass never rescans the session.
+ *
+ * `flatten` used to walk the chunk list from index 0 every window, and the list
+ * grows for the whole recording — ~14,000 chunks after fifteen minutes, walked
+ * every two seconds, on the same thread as MediaRecorder. Consumed chunks are
+ * dropped and this records how many samples they held.
+ */
+let discarded = 0;
 
 function flatten(chunks: Float32Array[], from: number, to: number): Float32Array {
   const out = new Float32Array(to - from);
@@ -111,22 +147,32 @@ function flatten(chunks: Float32Array[], from: number, to: number): Float32Array
   return out;
 }
 
-async function transcribeLiveWindow(pcm: Float32Array[]): Promise<void> {
+async function transcribeLiveWindow(state: Live): Promise<void> {
   if (liveBusy) return; // a window still running; the next tick will catch up
-  const total = pcm.reduce((n, c) => n + c.length, 0);
-  if (total - liveOffset < LIVE_WINDOW_SAMPLES) return;
+  const available = discarded + state.pcm.reduce((n, c) => n + c.length, 0);
+  if (available - liveOffset < LIVE_WINDOW_SAMPLES) return;
 
   liveBusy = true;
   const from = liveOffset;
   const to = from + LIVE_WINDOW_SAMPLES;
   liveOffset = to;
   try {
-    const window = flatten(pcm, from, to);
+    const window = flatten(state.pcm, from - discarded, to - discarded);
+
+    // Drop what has been consumed. The authoritative pass at stop reads the
+    // whole recording back from video.webm rather than from this buffer, so
+    // nothing needs it after transcription.
+    while (state.pcm.length && discarded + state.pcm[0]!.length <= to) {
+      discarded += state.pcm.shift()!.length;
+    }
+
     const segments = cleanSegments(
       await transformersEngine(tier).transcribe(window, (from / 16_000) * 1000),
     );
     if (segments.length) {
-      void chrome.runtime.sendMessage({ type: LIVE_SPEECH, segments }).catch(() => {});
+      appendSpeech(
+        toSpeechEvents(segments, '').map((e) => JSON.stringify({ ...e, provisional: true })),
+      );
     }
   } catch {
     // A failed window costs that window and nothing else. The authoritative
@@ -214,6 +260,10 @@ async function start(msg: {
   // A failure here is not fatal — chunks buffer in memory and are flushed at
   // stop instead — but it must be *reported*, because the buffered path is the
   // one that used to lose the video entirely.
+  speechStream = await openSpeechStream(msg.sessionId).catch(() => null);
+  liveOffset = 0;
+  discarded = 0;
+
   let streamError: string | null = null;
   const writable = await openSessionStream(msg.sessionId).catch((e) => {
     streamError = String((e as Error)?.message ?? e);
@@ -257,7 +307,7 @@ async function start(msg: {
   state.liveTimer =
     msg.liveTranscription === false
       ? 0
-      : (setInterval(() => void transcribeLiveWindow(state.pcm), 2_000) as unknown as number);
+      : (setInterval(() => void transcribeLiveWindow(state), 2_000) as unknown as number);
 
   state.recorder.start(CHUNK_MS);
   const t0 = Date.now();
@@ -284,6 +334,7 @@ async function stop(): Promise<unknown> {
   if (!state) return { ok: true };
 
   clearInterval(state.liveTimer);
+  await speechWrites;
   await new Promise<void>((resolve) => {
     state.recorder.onstop = () => resolve();
     if (state.recorder.state === 'inactive') resolve();
@@ -577,6 +628,17 @@ async function zipSession(msg: {
   // JSON message channel.
   const url = URL.createObjectURL(new Blob([zipped], { type: 'application/zip' }));
   return { ok: true, url, bytes: zipped.byteLength, files: Object.keys(entries).length };
+}
+
+async function openSpeechStream(
+  session: string,
+): Promise<{ file: FileSystemFileHandle; bytes: number } | null> {
+  const dir = await idbGet<FileSystemDirectoryHandle>('sessionDirectory');
+  if (!dir) return null;
+  const folder = await dir.getDirectoryHandle(session, { create: true });
+  const file = await folder.getFileHandle('speech.ndjson', { create: true });
+  await (await file.createWritable()).close();
+  return { file, bytes: 0 };
 }
 
 async function openSessionStream(session: string): Promise<FileSystemWritableFileStream> {

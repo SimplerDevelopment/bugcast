@@ -14,7 +14,6 @@ import type { RedactionSummary } from '../lib/redact';
 import {
   DROP_MARKER,
   MODEL_PROGRESS,
-  LIVE_SPEECH,
   OFFSCREEN_SELF_TEST,
   RUN_SELF_TEST,
   INTERACTION,
@@ -43,15 +42,15 @@ interface Recording {
   /** Stops the worker being terminated mid-session. See keepAwake(). */
   awake: number;
   /**
-   * Two streams, written independently.
+   * The event stream. Narration is written by the offscreen document to
+   * `speech.ndjson` and never passes through here.
    *
-   * Events and narration are separate outputs: `events.ndjson` and
-   * `speech.ndjson`. A consumer that wants them interleaved merges on `t`,
-   * which is exact — both are measured from the same `t0` at
-   * `MediaRecorder.start()`, and speech offsets come from the audio sample
-   * position rather than from when transcription finished.
+   * The two pipelines share exactly one thing: the clock. `t` is measured from
+   * `t0` at `MediaRecorder.start()` in both, and speech offsets come from the
+   * audio sample position rather than from when transcription finished — so
+   * merging on `t` is exact without the pipelines touching.
    */
-  streams: Record<StreamName, Stream>;
+  stream: Stream;
   writes: Promise<void>;
   flushTimer: number;
   /**
@@ -94,9 +93,6 @@ async function handle(msg: any): Promise<Response> {
       await chrome.storage.local.set({
         modelProgress: { percent: msg.percent, mb: msg.mb, at: Date.now() },
       });
-      return { ok: true, recording: active !== null };
-    case LIVE_SPEECH:
-      recordLiveSpeech(msg.segments);
       return { ok: true, recording: active !== null };
     case DROP_MARKER:
       return { ok: true, recording: dropMarker(msg.note || 'Marked') };
@@ -142,7 +138,7 @@ async function start(
   const beforeActive: string[] = [];
   const record = (event: TimelineEvent): void => {
     events.push(event);
-    if (active) queueLine(event.type === 'speech' ? 'speech' : 'events', JSON.stringify(event));
+    if (active) queueLine(JSON.stringify(event));
     else beforeActive.push(JSON.stringify(event));
   };
   const id = sessionId(startedAt, pageUrl ?? tab.url ?? '');
@@ -196,19 +192,13 @@ async function start(
     if (active) void stop();
   };
 
-  const streams = {
-    events: await openStream(id, 'events.ndjson'),
-    speech: await openStream(id, 'speech.ndjson'),
-  };
+  const stream = await openStream(id, 'events.ndjson');
 
   active = {
     cdp,
     ctx,
     events,
-    streams: {
-      events: { ...streams.events, pending: [...beforeActive] },
-      speech: streams.speech,
-    },
+    stream: { ...stream, pending: [...beforeActive] },
     writes: Promise.resolve(),
     // No shared interval: each stream schedules its own flush when something
     // is queued, so events do not wait on a tick that has not come round yet.
@@ -225,9 +215,7 @@ async function start(
   // never scheduled — only queueLine sets the debounce timer. On a quiet page
   // with no later event to trigger a flush, those lines sat in memory forever
   // and the stream stayed empty.
-  for (const name of ['events', 'speech'] as const) {
-    if (active.streams[name].pending.length) void flushStream(active.streams[name]);
-  }
+  if (active.stream.pending.length) void flushStream(active.stream);
 
   setBadge(true);
   await chrome.storage.local.set({ recording: true });
@@ -280,13 +268,10 @@ async function stop(): Promise<Response> {
   // click it describes, because people narrate intent before acting.
   const segments = capture?.segments ?? [];
   if (segments.length) {
-    // The authoritative pass supersedes every provisional line. events.ndjson
-    // keeps both — it is an append-only log of what was known when — while
-    // timeline.json carries only the final text.
-    for (let i = events.length - 1; i >= 0; i--) {
-      const e = events[i]!;
-      if (e.type === 'speech' && e.provisional) events.splice(i, 1);
-    }
+    // Only the authoritative pass ever reaches this array — provisional lines
+    // live solely in speech.ndjson, which stays an append-only log of what was
+    // known at the time. These are merged in purely so report.md can interleave
+    // them; timeline.json filters them back out.
     events.push(...toSpeechEvents(segments, startUrl));
     events.sort((a, b) => a.t - b.t);
   }
@@ -571,21 +556,6 @@ async function injectInteractionCapture(tabId: number): Promise<void> {
 
 async function unregisterInteractionCapture(): Promise<void> {
   await chrome.scripting.unregisterContentScripts({ ids: [CONTENT_SCRIPT_ID] }).catch(() => {});
-}
-
-/**
- * Provisional narration from a rolling window.
- *
- * Flagged rather than quietly replaced later, because a consumer reading the
- * stream should be able to tell approximate text from final text. The
- * authoritative pass at stop drops these and re-derives from the whole audio;
- * it never reads them, so a bad window cannot reach the artifact on disk.
- */
-function recordLiveSpeech(segments: Segment[] | undefined): void {
-  if (!active || !segments?.length) return;
-  for (const event of toSpeechEvents(segments, active.ctx.pageUrl)) {
-    recordEvent({ ...event, provisional: true });
-  }
 }
 
 /**
@@ -940,8 +910,6 @@ async function offscreenCheck(which: 'capture' | 'mic' | 'asr'): Promise<string>
   return (res as any).detail as string;
 }
 
-type StreamName = 'events' | 'speech';
-
 /**
  * How long a stream waits before writing what it has.
  *
@@ -953,7 +921,7 @@ type StreamName = 'events' | 'speech';
  * Speech stays slow on purpose. It arrives in bursts from ten-second windows,
  * so a short debounce would add wakeups without making anything fresher.
  */
-const DEBOUNCE_MS: Record<StreamName, number> = { events: 150, speech: 2_000 };
+const DEBOUNCE_MS = 150;
 
 interface Stream {
   file: FileSystemFileHandle | null;
@@ -989,15 +957,15 @@ async function openStream(session: string, name: string): Promise<Stream> {
  * an event reaching disk — which is the other half of the contention that
  * prompted splitting the outputs.
  */
-function queueLine(name: StreamName, line: string): void {
-  const stream = active?.streams[name];
+function queueLine(line: string): void {
+  const stream = active?.stream;
   if (!stream) return;
   stream.pending.push(line);
   if (stream.timer !== null) return;
   stream.timer = setTimeout(() => {
     stream.timer = null;
     void flushStream(stream);
-  }, DEBOUNCE_MS[name]) as unknown as number;
+  }, DEBOUNCE_MS) as unknown as number;
 }
 
 /**
@@ -1013,16 +981,12 @@ function queueLine(name: StreamName, line: string): void {
 function flushEvents(): Promise<void> {
   const session = active;
   if (!session) return Promise.resolve();
-  return Promise.all(
-    (Object.keys(session.streams) as StreamName[]).map((name) => {
-      const stream = session.streams[name];
-      if (stream.timer !== null) {
-        clearTimeout(stream.timer);
-        stream.timer = null;
-      }
-      return flushStream(stream);
-    }),
-  ).then(() => {});
+  const stream = session.stream;
+  if (stream.timer !== null) {
+    clearTimeout(stream.timer);
+    stream.timer = null;
+  }
+  return flushStream(stream);
 }
 
 function flushStream(stream: Stream): Promise<void> {
@@ -1048,19 +1012,15 @@ function flushStream(stream: Stream): Promise<void> {
 /**
  * The one place an event joins a session.
  *
- * Every path must go through here. Interactions, markers and live speech each
- * used to call `events.push` directly, so they reached timeline.json and never
- * reached the stream — a stream quietly missing half the session, which the
- * disk smoke caught by comparing the two counts.
+ * Every path goes through here — interactions and markers each used to call
+ * `events.push` directly, so they reached timeline.json and never reached the
+ * stream, which the disk smoke caught by comparing counts.
+ *
+ * Narration is not one of these paths: the offscreen document writes
+ * speech.ndjson itself and never sends it here.
  */
-function recordEvent(event: TimelineEvent, events?: TimelineEvent[], pending?: string[]): void {
-  const list = events ?? active?.events;
-  if (!list) return;
-  list.push(event);
-
-  // Narration goes to its own stream. Both carry `t` from the same origin, so a
-  // consumer that wants them interleaved merges on it.
-  const line = JSON.stringify(event);
-  if (pending) pending.push(line);
-  else queueLine(event.type === 'speech' ? 'speech' : 'events', line);
+function recordEvent(event: TimelineEvent): void {
+  if (!active) return;
+  active.events.push(event);
+  queueLine(JSON.stringify(event));
 }
