@@ -126,6 +126,9 @@ export async function isLive(root, id) {
   return (await has('events.ndjson')) && !(await has('timeline.json'));
 }
 
+/** Events and narration are separate outputs; both carry `t` from one origin. */
+export const STREAMS = { events: 'events.ndjson', speech: 'speech.ndjson' };
+
 /**
  * Read the append-only stream from a cursor.
  *
@@ -136,9 +139,10 @@ export async function isLive(root, id) {
  * A trailing partial line is dropped rather than parsed — writes are batched, so
  * a read can land between the write and its newline.
  */
-export async function tailEvents(root, id, cursor = 0, limit = 200) {
-  const text = await readFile(path.join(root, id, 'events.ndjson'), 'utf8').catch(() => '');
-  if (!text) return { events: [], cursor, live: await isLive(root, id), total: 0 };
+export async function tailEvents(root, id, cursor = 0, limit = 200, stream = 'events') {
+  const file = STREAMS[stream] ?? STREAMS.events;
+  const text = await readFile(path.join(root, id, file), 'utf8').catch(() => '');
+  if (!text) return { stream, events: [], cursor, live: await isLive(root, id), total: 0 };
 
   const lines = text.split('\n');
   if (lines[lines.length - 1] !== '') lines.pop(); // partial trailing line
@@ -156,6 +160,7 @@ export async function tailEvents(root, id, cursor = 0, limit = 200) {
     }
   }
   return {
+    stream,
     events,
     cursor: cursor + events.length,
     total: lines.length,
@@ -213,11 +218,11 @@ export function waitForChange(root, id, ms) {
  * into the polling loop this exists to remove, so it keeps waiting until there
  * are genuinely new events or the deadline passes.
  */
-export async function tailEventsWaiting(root, id, cursor = 0, limit = 200, waitMs = 0) {
+export async function tailEventsWaiting(root, id, cursor = 0, limit = 200, waitMs = 0, stream = 'events') {
   const deadline = Date.now() + Math.min(Math.max(waitMs | 0, 0), MAX_WAIT_MS);
 
   for (;;) {
-    const out = await tailEvents(root, id, cursor, limit);
+    const out = await tailEvents(root, id, cursor, limit, stream);
     // Nothing to wait *for* once the session has stopped: no more will arrive.
     if (out.events.length || !out.live) return out;
 

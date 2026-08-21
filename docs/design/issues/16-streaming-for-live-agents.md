@@ -123,12 +123,18 @@ the recording.
 It now runs in a dedicated module worker. Windows are transferred rather than
 copied (a ten-second window is ~640KB, repeatedly).
 
-**Separating execution, not output.** The obvious reading of "record them
-separately" is a second file, and that would be a mistake: the whole reason
-speech is in the same array is that narration lands *before* the click it
-describes. Splitting the streams hands the consumer a merge problem to solve
-that this tool exists to have already solved. What needed separating was the
-thread.
+**Separating execution — and then, on request, the output too.** Moving
+inference to a worker fixed the contention. I argued against splitting the files
+as well, on the grounds that speech shares the array precisely because narration
+lands *before* the click it describes, and splitting hands the consumer a merge
+problem. Overruled, and built: `events.ndjson` and `speech.ndjson` are separate
+outputs, `timeline.json` carries events only, and narration is `transcript.srt`.
+
+The ordering argument survives as a property rather than a layout: both streams
+carry `t` from the same origin, so merging on it is exact, and `report.md` does
+exactly that. `session_tail` takes a `stream` parameter. What was a guarantee is
+now a documented one-line merge — a real cost, and a reasonable price for
+outputs that can be consumed independently.
 
 **Timestamps were never at risk**, which is worth stating because it is not
 obvious: speech offsets are derived from the audio sample position

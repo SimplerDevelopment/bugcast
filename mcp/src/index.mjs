@@ -149,6 +149,13 @@ server.registerTool(
       sessionId: z.string().describe('Or "latest" for the most recent session.'),
       cursor: z.number().int().min(0).default(0).optional(),
       limit: z.number().int().min(1).max(500).default(200).optional(),
+      stream: z
+        .enum(['events', 'speech'])
+        .default('events')
+        .optional()
+        .describe(
+          'Which output to follow. Events and narration are separate streams; both carry `t` in ms from the same origin, so merge on it to interleave. Narration lands *before* the action it describes.',
+        ),
       waitMs: z
         .number()
         .int()
@@ -160,15 +167,15 @@ server.registerTool(
         ),
     },
   },
-  async ({ sessionId, cursor = 0, limit = 200, waitMs = 0 }) => {
+  async ({ sessionId, cursor = 0, limit = 200, waitMs = 0, stream = 'events' }) => {
     const ids = await listSessionIds(ROOT);
     const id = sessionId === 'latest' ? ids[0] : resolveSessionId(sessionId, ids);
     if (!id) return text({ error: 'No sessions recorded yet.' });
 
     return text(
       waitMs
-        ? await tailEventsWaiting(ROOT, id, cursor, limit, waitMs)
-        : await tailEvents(ROOT, id, cursor, limit),
+        ? await tailEventsWaiting(ROOT, id, cursor, limit, waitMs, stream)
+        : await tailEvents(ROOT, id, cursor, limit, stream),
     );
   },
 );

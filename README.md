@@ -13,9 +13,10 @@ Then hand the folder to a coding agent.
 2026-08-20T14-32-09_app-simplerdev-com/
   report.md          # deterministic rendering of the timeline — start here
   session.json       # manifest: capture config, environment, redaction summary
-  timeline.json      # flat, time-ordered, discriminated union
+  timeline.json      # events, flat and time-ordered
   events.ndjson      # the same events, appended live as they happen
-  transcript.srt     # your narration, timestamped
+  speech.ndjson      # narration, appended live as it is recognised
+  transcript.srt     # narration, timestamped against the video
   video.webm
   frames/            # a JPEG at each event boundary
 ```
@@ -93,8 +94,14 @@ It can also read a session **while you are still recording it**, so an agent
 follows along live rather than waiting for you to finish:
 
 ```
-session_tail({ sessionId: "latest" })   ->   { events, cursor, live: true }
+session_tail({ sessionId: "latest" })                    -> events
+session_tail({ sessionId: "latest", stream: "speech" })  -> narration
 ```
+
+Events and narration are **separate outputs**. Both carry `t` in milliseconds
+from the same origin, so merging on it is exact — and worth doing, because
+narration lands *before* the action it describes. `report.md` merges them for
+you.
 
 See [`mcp/`](mcp/) for the tools. Strictly optional — recording never depends on
 it, and `report.md` alone is a complete handoff.

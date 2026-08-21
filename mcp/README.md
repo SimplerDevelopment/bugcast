@@ -27,7 +27,7 @@ to "what sessions exist", not a reason to fail on the first run.
 | Tool | |
 |---|---|
 | `sessions_list` | Recent sessions, newest first. A session still recording is marked `live`. |
-| `session_tail` | Events since a cursor, **works during recording**. Poll with the returned cursor to follow along. |
+| `session_tail` | Events since a cursor, **works during recording**. `stream: "speech"` follows narration instead. |
 | `session_report` | The human-readable rendering of a finished session. Start here for a post-mortem. |
 | `session_query` | A filtered slice of a finished timeline. `failedOnly: true` answers "what went wrong". |
 | `session_frame` | The JPEG nearest a moment, for seeing what the page showed. |
@@ -40,6 +40,12 @@ session_tail({ sessionId: "latest", waitMs: 30000 })
 session_tail({ sessionId: "latest", cursor, waitMs: 30000 })
   -> returns the moment something happens, or empty at the deadline
 ```
+
+Events and narration are separate streams. Both carry `t` in milliseconds from
+the same origin — `t0` at `MediaRecorder.start()`, with speech offsets taken from
+the audio sample position rather than from when transcription finished — so
+merging on `t` is exact. Worth doing: narration lands *before* the action it
+describes, because people narrate intent before acting.
 
 **Use `waitMs` instead of a polling loop.** The call blocks until events arrive
 past your cursor, watching the file rather than re-checking it, so you make one

@@ -388,6 +388,8 @@ const files = await ext.evaluate(async (id) => {
 }, stopped.sessionId);
 console.log('\n=== written to disk ===');
 console.log((files ?? ['(nothing)']).map((f) => '  ' + f).join('\n'));
+// timeline.json holds events only now — speech is its own stream — so the
+// stream and the timeline should still agree on the non-speech events.
 // The stream and the timeline must contain the same events. They diverged once —
 // interactions and markers pushed to the timeline directly and never reached the
 // stream, so events.ndjson was quietly missing half the session.

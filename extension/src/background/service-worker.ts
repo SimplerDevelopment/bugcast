@@ -41,18 +41,15 @@ interface Recording {
   id: string;
   video: boolean;
   /**
-   * The file, not a writable held open.
+   * Two streams, written independently.
    *
-   * `createWritable()` writes to a temporary swap file and only commits on
-   * `close()` — so a writable kept open for the session produces an empty file
-   * on disk until stop, which is the opposite of streaming. Each flush opens,
-   * seeks to the end, writes and closes, so every batch is visible immediately.
+   * Events and narration are separate outputs: `events.ndjson` and
+   * `speech.ndjson`. A consumer that wants them interleaved merges on `t`,
+   * which is exact — both are measured from the same `t0` at
+   * `MediaRecorder.start()`, and speech offsets come from the audio sample
+   * position rather than from when transcription finished.
    */
-  ndjson: FileSystemFileHandle | null;
-  /** Byte offset to seek to, since each flush reopens the file. */
-  bytesWritten: number;
-  /** Batched rather than written per event — see below. */
-  pending: string[];
+  streams: Record<StreamName, Stream>;
   writes: Promise<void>;
   flushTimer: number;
   /**
@@ -187,18 +184,19 @@ async function start(
     if (active) void stop();
   };
 
-  const ndjson = await openEventStream(id).catch((e) => {
-    console.warn('[bugcast] live event stream unavailable', e);
-    return null;
-  });
+  const streams = {
+    events: await openStream(id, 'events.ndjson'),
+    speech: await openStream(id, 'speech.ndjson'),
+  };
 
   active = {
     cdp,
     ctx,
     events,
-    ndjson,
-    bytesWritten: 0,
-    pending: pendingBeforeActive,
+    streams: {
+      events: { ...streams.events, pending: pendingBeforeActive },
+      speech: streams.speech,
+    },
     writes: Promise.resolve(),
     // Batched every couple of seconds rather than written per event. Not a
     // micro-optimisation: the File System Access grant lapsing has been the
@@ -380,7 +378,10 @@ function renderSessionReport(
       userAgent: navigator.userAgent,
       redaction,
       files: [
-        ['timeline.json', `${events.length} events — full detail, the source of truth`],
+        ['timeline.json', `${events.filter((e) => e.type !== 'speech').length} events`],
+        ['events.ndjson', 'the same events, appended live as they happened'],
+        ['speech.ndjson', 'narration, appended live (provisional until the final pass)'],
+        ['transcript.srt', 'narration, timestamped against the video'],
         ['session.json', 'manifest — capture config, environment, redaction summary'],
       ],
     },
@@ -442,6 +443,8 @@ function sessionFiles(
         },
         files: {
           timeline: 'timeline.json',
+          events: 'events.ndjson',
+          speech: 'speech.ndjson',
           report: 'report.md',
           ...(video ? { video: 'video.webm' } : {}),
           ...(segments.length ? { transcript: 'transcript.srt' } : {}),
@@ -456,7 +459,20 @@ function sessionFiles(
     ['session.json', manifest],
     [
       'timeline.json',
-      JSON.stringify({ schemaVersion: SCHEMA_VERSION, sessionId: id, t0Epoch: startedAt.getTime(), events }, null, 2),
+      JSON.stringify(
+        {
+          schemaVersion: SCHEMA_VERSION,
+          sessionId: id,
+          t0Epoch: startedAt.getTime(),
+          // Events only. Narration lives in transcript.srt and speech.ndjson.
+          // Merge on `t` to interleave them — report.md does exactly that, and
+          // the ordering is informative: narration lands before the click it
+          // describes, because people narrate intent before acting.
+          events: events.filter((e) => e.type !== 'speech'),
+        },
+        null,
+        2,
+      ),
     ],
     ['report.md', report],
     ...(segments.length ? ([['transcript.srt', toSrt(segments)]] as Array<[string, string]>) : []),
@@ -864,47 +880,69 @@ async function offscreenCheck(which: 'capture' | 'mic' | 'asr'): Promise<string>
 /** How often queued events reach disk. */
 const FLUSH_MS = 2_000;
 
-async function openEventStream(session: string): Promise<FileSystemFileHandle | null> {
-  const dir = await storedSessionDirectory();
-  if (!dir) return null;
-  const folder = await dir.getDirectoryHandle(session, { create: true });
-  // Created empty up front so a reader can start following before the first
-  // batch, and so `isLive` sees the session immediately.
-  const file = await folder.getFileHandle('events.ndjson', { create: true });
-  await (await file.createWritable()).close();
-  return file;
+type StreamName = 'events' | 'speech';
+
+interface Stream {
+  file: FileSystemFileHandle | null;
+  /** Byte offset to seek to, since each flush reopens the file. */
+  bytes: number;
+  pending: string[];
+  writes: Promise<void>;
+}
+
+async function openStream(session: string, name: string): Promise<Stream> {
+  const empty: Stream = { file: null, bytes: 0, pending: [], writes: Promise.resolve() };
+  try {
+    const dir = await storedSessionDirectory();
+    if (!dir) return empty;
+    const folder = await dir.getDirectoryHandle(session, { create: true });
+    // Created empty up front so a reader can start following before the first
+    // batch, and so a live session is detectable immediately.
+    const file = await folder.getFileHandle(name, { create: true });
+    await (await file.createWritable()).close();
+    return { ...empty, file };
+  } catch (e) {
+    console.warn(`[bugcast] ${name} unavailable`, e);
+    return empty;
+  }
 }
 
 /**
- * Append whatever has accumulated.
+ * Append whatever has accumulated, to both streams.
  *
- * Serialised through a promise chain for the same reason the video chunks are:
- * concurrent writes on one writable interleave, and a close that races them
- * truncates the file.
+ * Serialised per stream through a promise chain: concurrent writes on one
+ * writable interleave, and a close that races them truncates the file.
+ *
+ * Each flush reopens rather than holding a writable across the session, because
+ * `createWritable()` commits only on `close()` — a held-open writable leaves an
+ * empty file on disk until stop, which is the opposite of streaming.
  */
 function flushEvents(): Promise<void> {
   const session = active;
-  if (!session?.ndjson || !session.pending.length) return session?.writes ?? Promise.resolve();
+  if (!session) return Promise.resolve();
+  return Promise.all(
+    (Object.keys(session.streams) as StreamName[]).map((name) => flushStream(session.streams[name])),
+  ).then(() => {});
+}
 
-  const batch = session.pending.join('\n') + '\n';
-  session.pending = [];
+function flushStream(stream: Stream): Promise<void> {
+  if (!stream.file || !stream.pending.length) return stream.writes;
 
-  session.writes = session.writes.then(async () => {
+  const batch = stream.pending.join('\n') + '\n';
+  stream.pending = [];
+
+  stream.writes = stream.writes.then(async () => {
     try {
-      // keepExistingData + seek, rather than a writable held open across the
-      // session: FSA only commits a writable's contents on close(), so holding
-      // one open leaves an empty file on disk until stop. Reopening per flush
-      // is what makes the stream actually readable while recording.
-      const writable = await session.ndjson!.createWritable({ keepExistingData: true });
-      await writable.seek(session.bytesWritten);
+      const writable = await stream.file!.createWritable({ keepExistingData: true });
+      await writable.seek(stream.bytes);
       await writable.write(batch);
       await writable.close();
-      session.bytesWritten += new TextEncoder().encode(batch).length;
+      stream.bytes += new TextEncoder().encode(batch).length;
     } catch (e) {
-      console.warn('[bugcast] event flush failed', e);
+      console.warn('[bugcast] flush failed', e);
     }
   });
-  return session.writes;
+  return stream.writes;
 }
 
 /**
@@ -912,13 +950,16 @@ function flushEvents(): Promise<void> {
  *
  * Every path must go through here. Interactions, markers and live speech each
  * used to call `events.push` directly, so they reached timeline.json and never
- * reached events.ndjson — a stream that was quietly missing half the session,
- * which the disk smoke caught by comparing the two counts.
+ * reached the stream — a stream quietly missing half the session, which the
+ * disk smoke caught by comparing the two counts.
  */
 function recordEvent(event: TimelineEvent, events?: TimelineEvent[], pending?: string[]): void {
   const list = events ?? active?.events;
-  const queue = pending ?? active?.pending;
   if (!list) return;
   list.push(event);
+
+  // Narration goes to its own stream. Both carry `t` from the same origin, so a
+  // consumer that wants them interleaved merges on it.
+  const queue = pending ?? active?.streams[event.type === 'speech' ? 'speech' : 'events'].pending;
   queue?.push(JSON.stringify(event));
 }

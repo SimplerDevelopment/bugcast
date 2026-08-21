@@ -135,3 +135,35 @@ test('zero wait resolves immediately', async () => {
   assert.equal(await waitForChange(root, id, 0), false);
   assert.ok(Date.now() - started < 50);
 });
+
+test('reads the speech stream separately from events', async () => {
+  const { root, id } = fixture(line(1) + '\n');
+  fs.writeFileSync(
+    path.join(root, id, 'speech.ndjson'),
+    JSON.stringify({ t: 900, type: 'speech', text: 'clicking save', provisional: true }) + '\n',
+  );
+  const events = await tailEvents(root, id, 0, 200, 'events');
+  const speech = await tailEvents(root, id, 0, 200, 'speech');
+  assert.equal(events.events[0].type, 'click');
+  assert.equal(speech.events[0].type, 'speech');
+  assert.equal(speech.stream, 'speech');
+});
+
+test('an absent speech stream is empty, not an error — a silent session has none', async () => {
+  const { root, id } = fixture(line(1) + '\n');
+  const out = await tailEvents(root, id, 0, 200, 'speech');
+  assert.deepEqual(out.events, []);
+});
+
+test('the two streams merge on t, and narration precedes the action', async () => {
+  const { root, id } = fixture(JSON.stringify({ t: 1000, type: 'click' }) + '\n');
+  fs.writeFileSync(
+    path.join(root, id, 'speech.ndjson'),
+    JSON.stringify({ t: 330, type: 'speech', text: 'and clicking save' }) + '\n',
+  );
+  const merged = [
+    ...(await tailEvents(root, id, 0, 200, 'events')).events,
+    ...(await tailEvents(root, id, 0, 200, 'speech')).events,
+  ].sort((a, b) => a.t - b.t);
+  assert.deepEqual(merged.map((e) => e.type), ['speech', 'click']);
+});
