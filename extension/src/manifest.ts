@@ -49,7 +49,11 @@ export default defineManifest({
   // does for a toolbar click.
   commands: {
     'toggle-recording': {
-      suggested_key: { default: 'Ctrl+Shift+R', mac: 'Command+Shift+R' },
+      // NOT Ctrl/Cmd+Shift+R — that is Chrome's own hard reload, and Chrome
+      // silently drops a conflicting suggestion rather than warning, so the
+      // shortcut simply never exists. Which is how someone ends up mid-session
+      // with no way to stop.
+      suggested_key: { default: 'Ctrl+Shift+U', mac: 'Command+Shift+U' },
       description: 'Start or stop recording',
     },
     'drop-marker': {

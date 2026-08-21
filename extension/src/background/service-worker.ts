@@ -160,9 +160,11 @@ async function start(
   record({ type: 'navigation', t: 0, pageUrl: ctx.pageUrl, trigger: 'load', from: null });
 
   cdp.detachedCallback = () => {
-    // The user dismissed the infobar mid-session. The session is over either
-    // way, so end it cleanly instead of collecting a half-recorded artifact.
-    active = null;
+    // The user dismissed the debugger infobar, or the tab closed. The session
+    // is over either way — but it must be *stopped*, not dropped: discarding
+    // `active` threw away everything recorded up to that point, which is the
+    // worst thing this tool can do and it was the default.
+    if (active) void stop();
   };
 
   const stream = await openEventStream(id).catch((e) => {
@@ -191,6 +193,7 @@ async function start(
     video: Boolean(capture),
   };
   setBadge(true);
+  await chrome.storage.local.set({ recording: true });
   return {
     ok: true,
     recording: true,
@@ -206,6 +209,7 @@ async function start(
 async function stop(): Promise<Response> {
   if (!active) return { ok: true, recording: false };
   const { cdp, events, startedAt, redactor, title, startUrl, id, video } = active;
+  await chrome.storage.local.set({ recording: false });
   clearInterval(active.flushTimer);
   const stream = active.stream;
   const finalFlush = flushEvents();

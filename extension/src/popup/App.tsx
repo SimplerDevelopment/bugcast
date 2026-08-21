@@ -54,37 +54,38 @@ export function App() {
   const [mic, setMic] = useState<PermissionState | 'unknown'>('unknown');
 
   useEffect(() => {
+    // Storage first, and rendered immediately from it. The worker's answer is
+    // reconciled after, best-effort, with a deadline.
+    //
+    // This used to gate the whole UI on sendMessage(RECORDING_STATE). A busy or
+    // terminated service worker never answers, `.catch` does not fire on a hang
+    // only on a rejection, and the popup opened showing nothing but its title —
+    // no Stop button, mid-recording. The one moment the UI must work is the one
+    // where it did not.
     void (async () => {
-      const [state, handle, stored] = await Promise.all([
-        chrome.runtime.sendMessage({ type: RECORDING_STATE }).catch(() => null),
-        storedSessionDirectory(),
-        chrome.storage.local.get(['modelTier', 'video', 'lastSession']),
+      const stored = await chrome.storage.local.get([
+        'modelTier',
+        'video',
+        'lastSession',
+        'recording',
       ]);
-      setRecording(Boolean(state?.recording));
-      setFolder(handle?.name ?? null);
+      setRecording(Boolean(stored?.recording));
       setTier((stored?.modelTier as ModelTier) ?? DEFAULT_TIER);
       setVideo(stored?.video !== false);
       setLast(stored?.lastSession ?? null);
-      // Chrome will only prompt from a visible page, and the recorder runs in a
-      // background document that has no window — so this is checked here and
-      // granted from a tab.
-      setMic(
-        await navigator.permissions
-          .query({ name: 'microphone' as PermissionName })
-          .then((p) => p.state)
-          .catch(() => 'unknown' as const),
-      );
-      setLast(stored?.lastSession ?? null);
-      // Chrome will only prompt from a visible page, and the recorder runs in a
-      // background document that has no window — so this is checked here and
-      // granted from a tab.
-      setMic(
-        await navigator.permissions
-          .query({ name: 'microphone' as PermissionName })
-          .then((p) => p.state)
-          .catch(() => 'unknown' as const),
-      );
       setReady(true);
+
+      void storedSessionDirectory().then((h) => setFolder(h?.name ?? null));
+      void navigator.permissions
+        .query({ name: 'microphone' as PermissionName })
+        .then((p) => setMic(p.state))
+        .catch(() => setMic('unknown'));
+
+      const answered = await Promise.race([
+        chrome.runtime.sendMessage({ type: RECORDING_STATE }).catch(() => null),
+        new Promise<null>((r) => setTimeout(() => r(null), 1500)),
+      ]);
+      if (answered) setRecording(Boolean(answered.recording));
     })();
   }, []);
 
