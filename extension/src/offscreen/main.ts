@@ -68,15 +68,6 @@ interface Live {
 let live: Live | null = null;
 
 /**
- * The last session's audio, kept here rather than sent anywhere.
- *
- * Transcription (#6) runs in *this* document, because transformers.js needs a
- * DOM and WebGPU — so shipping tens of megabytes of Float32 across a message
- * boundary to the worker and back would be pure loss.
- */
-export let lastSamples: Float32Array = new Float32Array(0);
-
-/**
  * The recording, when it could not be streamed to disk.
  *
  * Only populated in the fallback path, and this is exactly the memory ceiling
@@ -314,7 +305,6 @@ async function stop(): Promise<unknown> {
     offset += chunk.length;
   }
 
-  lastSamples = samples;
 
   // Post-hoc, not streaming: ten minutes transcribes in under a minute either
   // way, so a streaming pipeline would be complexity bought for nothing.

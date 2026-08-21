@@ -99,18 +99,18 @@ async function assertRuntimePresent(): Promise<void> {
   }
 }
 
-let cached: Promise<any> | null = null;
-
-/**
- * Report download progress.
- *
- * The first run fetches ~105MB for base.en, and without this the UI showed
- * "Running…" for minutes — indistinguishable from a hang, which is exactly how
- * it was reported. A number moving is the difference between waiting and
- * assuming something is broken.
- */
 const downloading = new Map<string, { loaded: number; total: number }>();
 
+/**
+ * Report download progress, aggregated across files.
+ *
+ * Forwarded from the worker, because the worker has no extension APIs and so
+ * cannot message the rest of the extension itself.
+ *
+ * Aggregated because several files download in parallel and each reports its
+ * own percentage — forwarding those directly produced 0 -> 10 -> 82 -> 35, and
+ * a number going backwards reads as a bug.
+ */
 function reportProgress(event: {
   status?: string;
   file?: string;
@@ -127,18 +127,15 @@ function reportProgress(event: {
     return;
   }
 
-  // Aggregated across files, not per-file. Several download in parallel and
-  // each reports its own percentage, so forwarding those directly produced
-  // 0 -> 10 -> 82 -> 35 — a number going backwards reads as a bug.
   let loaded = 0;
   let total = 0;
   for (const entry of downloading.values()) {
     loaded += entry.loaded;
     total += entry.total;
   }
-  // The config and tokenizer files are a few KB and finish before the weights
-  // start, so an aggregate over only those reads as 100% before the real
-  // download has begun. Wait until there is something worth reporting.
+  // The config and tokenizer are a few KB and finish before the weights start,
+  // so an aggregate over only those reads as 100% before the real download has
+  // begun.
   if (total < 1_000_000) return;
 
   void chrome.runtime
@@ -150,49 +147,60 @@ function reportProgress(event: {
     .catch(() => {});
 }
 
-async function load(tier: ModelTier, dtype: unknown = DTYPE): Promise<any> {
-  const { env, pipeline } = await import('@huggingface/transformers');
+let worker: Worker | null = null;
+let loaded: Promise<void> | null = null;
+let nextId = 0;
+const inflight = new Map<number, (value: { chunks: any[]; text: string; error?: string }) => void>();
 
-  // Local runtime binaries. Without this transformers.js fetches them from a
-  // CDN at first inference, which would put a network call in the middle of a
-  // tool whose entire premise is that it runs locally.
-  const wasm = env.backends?.onnx?.wasm;
-  if (!wasm) throw new Error('transformers.js exposed no wasm backend to point at local binaries');
-  wasm.wasmPaths = chrome.runtime.getURL('ort/');
+/**
+ * The worker, started once and kept.
+ *
+ * Starting it lazily rather than at record time matters: the model load is the
+ * expensive part and a session with no narration should never pay it.
+ */
+function ensureWorker(tier: ModelTier, dtype: unknown): Promise<void> {
+  if (loaded) return loaded;
 
-  // Checked before use, because the failure otherwise is
-  // "Failed to fetch dynamically imported module ... asyncify.mjs" — which
-  // reads like a network problem and is a missing build step. dist/ort/ is
-  // populated by scripts/copy-ort.mjs, which runs as part of `bun run build`
-  // and NOT as part of a bare `vite build`, so a hand-run build silently ships
-  // an extension whose transcription cannot start.
-  await assertRuntimePresent();
-  // No local models are bundled, so leaving this on makes transformers.js probe
-  // /models/... for seven files first and log a "Failed to fetch" for each —
-  // seven alarming console errors on a path that was always going to fall
-  // through to the download. The offline story is a documented manual step, not
-  // this default.
-  env.allowLocalModels = false;
-  // The one documented exception to zero-network: the model itself downloads
-  // once and caches forever. An offline path is loading it from disk instead.
-  env.allowRemoteModels = true;
+  // Checked here rather than in the worker: this side has the extension APIs,
+  // and a missing runtime should say so instead of surfacing as an opaque
+  // worker failure.
+  const runtimeReady = assertRuntimePresent();
 
-  // WASM, not WebGPU, and pinned rather than auto-selected.
-  //
-  // WebGPU is not merely unproven here — the one primary benchmark in
-  // docs/design/issues/03 had WASM beating it for Whisper — it also costs ~60MB
-  // of extra runtime binaries in the extension download, because the WebGPU
-  // path pulls in both the jsep and asyncify runtimes. Shipping only the WASM
-  // runtime and then letting the code ask for WebGPU is how you get "no
-  // available backend found" on a real machine, which is exactly what happened.
-  //
-  // If a real measurement ever favours WebGPU, both halves change together:
-  // this line and scripts/copy-ort.mjs.
-  return pipeline('automatic-speech-recognition', MODELS[tier], {
-    device: DEVICE as never,
-    dtype: dtype as never,
-    progress_callback: reportProgress as never,
+  worker = new Worker(chrome.runtime.getURL('whisper-worker.js'), { type: 'module' });
+  worker.onmessage = (e: MessageEvent<any>) => {
+    const msg = e.data;
+    if (msg?.type === 'progress') return reportProgress(msg.event ?? {});
+    if (msg?.type === 'result') {
+      inflight.get(msg.id)?.(msg);
+      inflight.delete(msg.id);
+    }
+  };
+
+  loaded = new Promise<void>((resolve, reject) => {
+    const onReady = (e: MessageEvent<any>) => {
+      if (e.data?.type !== 'ready') return;
+      worker!.removeEventListener('message', onReady);
+      if (e.data.error) {
+        loaded = null;
+        reject(new Error(e.data.error));
+      } else resolve();
+    };
+    worker!.addEventListener('message', onReady);
+    void runtimeReady.catch((e) => {
+      loaded = null;
+      reject(e);
+    });
+    worker!.postMessage({
+      type: 'load',
+      model: MODELS[tier],
+      dtype,
+      // Extension APIs do not exist in a worker, so the runtime path is
+      // resolved here and handed over.
+      wasmPath: chrome.runtime.getURL('ort/'),
+    });
   });
+
+  return loaded;
 }
 
 export function transformersEngine(
@@ -205,24 +213,25 @@ export function transformersEngine(
       // never cost the recording.
       if (samples.length < MIN_SAMPLES) return [];
 
-      cached ??= load(tier, dtype);
-      const asr = await cached;
+      await ensureWorker(tier, dtype);
 
-      const out = await asr(samples, {
-        return_timestamps: true,
-        // Whisper's own window. The stride gives overlap so a word straddling
-        // a boundary is not lost.
-        chunk_length_s: 30,
-        stride_length_s: 5,
+      const id = ++nextId;
+      const out = await new Promise<{ chunks: any[]; text: string; error?: string }>((resolve) => {
+        inflight.set(id, resolve);
+        // Transferred, not copied: a ten-second window is ~640KB and this runs
+        // repeatedly during a session.
+        worker!.postMessage({ type: 'transcribe', id, samples, offsetMs: t0Offset }, [
+          samples.buffer,
+        ]);
       });
+      if (out.error) throw new Error(out.error);
 
-      const chunks = out?.chunks ?? [];
-      if (!chunks.length && out?.text?.trim()) {
+      if (!out.chunks.length && out.text?.trim()) {
         // Some builds return only `text` when the audio is shorter than one
-        // chunk. One segment spanning the audio is better than dropping it.
-        return [{ start: t0Offset, end: t0Offset + (samples.length / 16) , text: out.text }];
+        // chunk. One segment spanning the audio beats dropping it.
+        return [{ start: t0Offset, end: t0Offset + samples.length / 16, text: out.text }];
       }
-      return chunksToSegments(chunks, t0Offset, (samples.length / 16_000) * 1000);
+      return chunksToSegments(out.chunks, t0Offset, (samples.length / 16_000) * 1000);
     },
   };
 }

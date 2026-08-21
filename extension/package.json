@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "node scripts/gen-icons.mjs && vite build && vite build -c vite.content.config.ts && vite build -c vite.offscreen.config.ts && node scripts/copy-ort.mjs",
+    "build": "node scripts/gen-icons.mjs && vite build && vite build -c vite.content.config.ts && vite build -c vite.offscreen.config.ts && vite build -c vite.worker.config.ts && node scripts/copy-ort.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "smoke": "bun run build && node scripts/smoke.mjs"

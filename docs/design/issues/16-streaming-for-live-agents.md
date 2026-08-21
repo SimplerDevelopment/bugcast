@@ -111,6 +111,31 @@ does provisional speech, which changes under a reader.
 Events inside one poll are batched into a single notification: five wakes for
 five errors in the same second is five turns spent on one problem.
 
+### Inference belongs off the capture thread
+
+Reported after the first real use: live transcription was slowing down event
+capture. Correct, and the cause was structural rather than incidental — Whisper
+ran on the offscreen document's main thread, which is also where
+`MediaRecorder`'s `ondataavailable` fires and where the AudioWorklet delivers
+PCM. Every inference pass blocked both. Transcribing while recording degraded
+the recording.
+
+It now runs in a dedicated module worker. Windows are transferred rather than
+copied (a ten-second window is ~640KB, repeatedly).
+
+**Separating execution, not output.** The obvious reading of "record them
+separately" is a second file, and that would be a mistake: the whole reason
+speech is in the same array is that narration lands *before* the click it
+describes. Splitting the streams hands the consumer a merge problem to solve
+that this tool exists to have already solved. What needed separating was the
+thread.
+
+**Timestamps were never at risk**, which is worth stating because it is not
+obvious: speech offsets are derived from the audio sample position
+(`sampleOffset / 16000 * 1000`), not from when inference finished. The
+transcriber can run arbitrarily far behind without the timeline drifting, and
+audio and video share `t0` at `MediaRecorder.start()`.
+
 ### Consequences
 
 - **09** — `events.ndjson` becomes the source; `timeline.json` joins
