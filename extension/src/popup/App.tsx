@@ -52,6 +52,7 @@ export function App() {
   } | null>(null);
   const [testing, setTesting] = useState(false);
   const [mic, setMic] = useState<PermissionState | 'unknown'>('unknown');
+  const [shortcuts, setShortcuts] = useState<chrome.commands.Command[]>([]);
 
   useEffect(() => {
     // Storage first, and rendered immediately from it. The worker's answer is
@@ -76,6 +77,9 @@ export function App() {
       setReady(true);
 
       void storedSessionDirectory().then((h) => setFolder(h?.name ?? null));
+      // Chrome drops a suggested shortcut that collides with its own and says
+      // nothing, so the only way to know whether one exists is to ask.
+      void chrome.commands.getAll().then(setShortcuts).catch(() => {});
       void navigator.permissions
         .query({ name: 'microphone' as PermissionName })
         .then((p) => setMic(p.state))
@@ -274,7 +278,10 @@ export function App() {
           onClick={mark}
           className="w-full rounded border border-neutral-300 px-3 py-2 text-sm hover:bg-neutral-50"
         >
-          Mark this moment <span className="text-neutral-400">⌘⇧M</span>
+          Mark this moment{' '}
+          <span className="text-neutral-400">
+            {shortcuts.find((c) => c.name === 'drop-marker')?.shortcut || 'no shortcut'}
+          </span>
         </button>
       ) : (
         <label className="flex items-center gap-2 text-xs text-neutral-600">
@@ -319,6 +326,20 @@ export function App() {
             <div className="text-red-600">Not saved: {last.writeError ?? 'unknown error'}</div>
           )}
         </div>
+      )}
+
+      {shortcuts.some((c) => !c.shortcut) && (
+        <button
+          onClick={() => void chrome.tabs.create({ url: 'chrome://extensions/shortcuts' })}
+          className="w-full rounded border border-amber-300 bg-amber-50 px-3 py-2 text-left text-[11px] leading-snug text-amber-900 hover:bg-amber-100"
+        >
+          <span className="font-medium">
+            {shortcuts.filter((c) => !c.shortcut).length === shortcuts.length
+              ? 'No keyboard shortcuts are set'
+              : 'A keyboard shortcut did not bind'}
+          </span>{' '}
+          — Chrome refuses one that collides with its own and does not say so. Assign your own.
+        </button>
       )}
 
       <div className="border-t border-neutral-200 pt-2">

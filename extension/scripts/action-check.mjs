@@ -12,7 +12,9 @@ const info = await sw.evaluate(async () => ({
   title: await chrome.action.getTitle({}),
   manifestPopup: chrome.runtime.getManifest().action?.default_popup,
   icons: Object.keys(chrome.runtime.getManifest().icons ?? {}),
-  commands: Object.keys(chrome.runtime.getManifest().commands ?? {}),
+  // What Chrome ACTUALLY bound, not what the manifest asked for. A collision
+  // with a Chrome shortcut yields an empty string and no warning anywhere.
+  commands: (await chrome.commands.getAll()).map((c) => `${c.name}: ${c.shortcut || 'NOT BOUND'}`),
   csp: chrome.runtime.getManifest().content_security_policy,
   iconFetch: await fetch(chrome.runtime.getURL('icons/16.png')).then((r) => r.status, (e) => e.message),
 }));
