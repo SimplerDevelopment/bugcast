@@ -31,7 +31,7 @@ import {
   listSessionIds,
   readFrame,
   readReport,
-  readTimeline,
+  readSessionEvents,
   resolveSessionId,
   summarise,
 } from './sessions.mjs';
@@ -120,7 +120,7 @@ server.registerTool(
   {
     title: 'Query a session timeline',
     description:
-      'A filtered slice of the timeline. Prefer this over reading timeline.json whole — a fifteen-minute session is roughly 50k tokens. Use failedOnly:true for "what went wrong".',
+      'A filtered slice of the timeline, narration included. Prefer this over reading timeline.json whole — a fifteen-minute session is roughly 50k tokens. Use failedOnly:true for "what went wrong", or type:"speech" for what the tester said.',
     inputSchema: {
       sessionId: z.string(),
       type: z
@@ -138,8 +138,7 @@ server.registerTool(
     },
   },
   async ({ sessionId, ...query }) => {
-    const timeline = await readTimeline(ROOT, await resolve(sessionId));
-    return text(filterEvents(timeline.events ?? [], query));
+    return text(filterEvents(await readSessionEvents(ROOT, await resolve(sessionId)), query));
   },
 );
 

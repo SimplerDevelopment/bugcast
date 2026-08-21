@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { checkSchema, filterEvents, isFailure, resolveSessionId } from './sessions.mjs';
+import {
+  checkSchema,
+  filterEvents,
+  isFailure,
+  navigationIndex,
+  pageUrlAt,
+  resolveSessionId,
+  stampPageUrls,
+} from './sessions.mjs';
 
 const LISTING = ['2026-08-20T14-32-09_app-simplerdev-com', '2026-08-19T09-00-00_localhost-3000'];
 
@@ -85,4 +93,59 @@ test('filterEvents reports truncation rather than silently dropping', () => {
 
 test('filterEvents is empty-safe', () => {
   assert.deepEqual(filterEvents([], {}), { total: 0, events: [], truncated: false });
+});
+
+// Narration ships `pageUrl: ''` because the offscreen document that writes
+// speech.ndjson shares nothing with the event pipeline but the clock. The page
+// is derived from the navigations around it instead.
+const NAVS = [
+  { type: 'navigation', t: 0, pageUrl: 'https://x.test/a' },
+  { type: 'navigation', t: 5000, pageUrl: 'https://x.test/b' },
+  { type: 'navigation', t: 9000, pageUrl: 'https://x.test/c' },
+];
+
+test('navigationIndex keeps only navigations that carry a url, sorted by t', () => {
+  const index = navigationIndex([
+    { type: 'click', t: 100, pageUrl: 'https://x.test/click' },
+    NAVS[2],
+    { type: 'navigation', t: 3000, pageUrl: '' },
+    NAVS[0],
+    NAVS[1],
+  ]);
+  assert.deepEqual(index.map((n) => n.t), [0, 5000, 9000]);
+});
+
+test('pageUrlAt returns the navigation in effect at that moment', () => {
+  const index = navigationIndex(NAVS);
+  assert.equal(pageUrlAt(index, 0), 'https://x.test/a');
+  assert.equal(pageUrlAt(index, 4999), 'https://x.test/a');
+  assert.equal(pageUrlAt(index, 5000), 'https://x.test/b', 'boundary is inclusive');
+  assert.equal(pageUrlAt(index, 7000), 'https://x.test/b');
+  assert.equal(pageUrlAt(index, 99000), 'https://x.test/c', 'past the last nav');
+});
+
+test('pageUrlAt yields nothing rather than guessing when it cannot know', () => {
+  assert.equal(pageUrlAt([], 1234), '', 'no navigations at all');
+  // Speech transcribed from a window that opened before the first navigation.
+  assert.equal(pageUrlAt(navigationIndex(NAVS.slice(1)), 10), '');
+});
+
+test('stampPageUrls fills the blank narration left by the capture pipeline', () => {
+  const out = stampPageUrls(
+    [{ type: 'speech', t: 6000, pageUrl: '', text: 'this is the bug' }],
+    navigationIndex(NAVS),
+  );
+  assert.equal(out[0].pageUrl, 'https://x.test/b');
+  assert.equal(out[0].text, 'this is the bug', 'the rest of the record is untouched');
+});
+
+test('stampPageUrls never overwrites a page the event recorded itself', () => {
+  // If capture is fixed later, its value must win over this derivation.
+  const real = [{ type: 'speech', t: 6000, pageUrl: 'https://x.test/recorded' }];
+  assert.equal(stampPageUrls(real, navigationIndex(NAVS))[0].pageUrl, 'https://x.test/recorded');
+});
+
+test('stampPageUrls leaves events alone when there is nothing to derive from', () => {
+  const events = [{ type: 'speech', t: 10, pageUrl: '' }];
+  assert.deepEqual(stampPageUrls(events, []), events);
 });
