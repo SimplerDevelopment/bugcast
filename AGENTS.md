@@ -197,25 +197,28 @@ Shipped: #1 clock · #2 CDP capture · #3 redaction · #7 disk output ·
 #8 frame index · #10 recording UX · #11 self-test · #12 MCP server ·
 #14 (closed as a false alarm) · #15 zip fallback · #13 CI and release.
 
-**#1-#16 are closed. #17-#24 are open**, all derived from
-[ticket 17](docs/design/issues/17-what-a-project-contributes.md) and the
-research pass behind it:
+**#1-#24 are closed.** #17-#24 came out of
+[ticket 17](docs/design/issues/17-what-a-project-contributes.md) and the two
+research passes behind it: the User Timing app-meta extension point, source maps
+indexed at capture and resolved at read, the `session_tail` follow-loop replacing
+the channel as the live story, and three measurements.
 
-- **#17** the app-meta extension point — *built and smoke-verified, awaiting its
-  commit*. Note it does **not** bump `schemaVersion`: additive changes do not,
-  and a bump would make the MCP server refuse every session recorded earlier.
-- **#18** `session_tail`'s opt-in `waitMs` ceiling · **#19** demote the channel
-  to a flagged extra and record the MCP SDK protocol hazard · **#20** the
-  duplicate `lastSession` write.
-- **#21** measure `tailEvents` before touching the cursor · **#22** a clean-room
-  harness for `Debugger.enable`, which **blocks #23**, source maps.
-- **#24** a second research pass — four areas where nothing survived
-  verification, including whether ticket 11 was right to ship no skill.
+**Two of those measurements said "don't", and that is the point of them.** The
+byte-offset cursor was rejected on evidence rather than principle — a realistic
+follow-loop costs 42ms in total (`mcp/scripts/tail-probe.mjs`). `Debugger.enable`
+turned out to cost nothing measurable, which is what let source-map indexing be
+always-on rather than an opt-in
+(`extension/scripts/debugger-cost-cleanroom.mjs`). And `DEVICE = 'wasm'` stays
+put, not because WASM is faster — no primary benchmark exists in either
+direction — but because the pinned WebGPU stack leaks ~650 MB per 30-second
+chunk.
 
-Read ticket 17 before picking any of these up: it corrects 16, reopens 11's
-no-skill decision, and names two measurement gates that must not be skipped.
-**#22 and #23 are ordered, not parallel** — the domain cost decides whether the
-Debugger domain can be always-on at all.
+Read `docs/design/map.md`'s **"What is measured, and what is folklore"** before
+proposing any performance change. It exists to enforce one rule: a perf change
+lands with its probe, or it does not land.
 
-Not on the tracker: the three things needing a human (above), and a Web Store
-submission.
+Still not on the tracker: the three things needing a human (above), a Web Store
+submission, and four areas a research pass tried and failed to close — MV3
+worker lifetime, File System Access throughput, Claude Skills authoring (which
+leaves ticket 11's no-skill decision un-evidenced), and what comparable tools
+capture that we do not.
