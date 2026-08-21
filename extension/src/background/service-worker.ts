@@ -38,8 +38,17 @@ interface Recording {
   title: string;
   id: string;
   video: boolean;
-  /** Open for the whole session; events.ndjson is appended to as it goes. */
-  stream: FileSystemWritableFileStream | null;
+  /**
+   * The file, not a writable held open.
+   *
+   * `createWritable()` writes to a temporary swap file and only commits on
+   * `close()` — so a writable kept open for the session produces an empty file
+   * on disk until stop, which is the opposite of streaming. Each flush opens,
+   * seeks to the end, writes and closes, so every batch is visible immediately.
+   */
+  ndjson: FileSystemFileHandle | null;
+  /** Byte offset to seek to, since each flush reopens the file. */
+  bytesWritten: number;
   /** Batched rather than written per event — see below. */
   pending: string[];
   writes: Promise<void>;
@@ -112,11 +121,12 @@ async function start(
 
   const events: TimelineEvent[] = [];
   const startedAt = new Date();
-  /** Appended to `events` and queued for the live stream in one place. */
   const record = (event: TimelineEvent): void => {
+    // Before `active` exists — only the synthetic initial navigation.
     events.push(event);
-    if (active) active.pending.push(JSON.stringify(event));
+    pendingBeforeActive.push(JSON.stringify(event));
   };
+  const pendingBeforeActive: string[] = [];
   const id = sessionId(startedAt, pageUrl ?? tab.url ?? '');
 
   // Capture starts before the clock does, because t0 belongs to
@@ -144,7 +154,7 @@ async function start(
     // only read tab.url when activeTab has been granted by a user gesture, and
     // relying on that would make page context silently empty in other flows.
     pageUrl: pageUrl ?? tab.url ?? '',
-    emit: record,
+    emit: (event) => recordEvent(event, events, pendingBeforeActive),
     // Runs in memory, before anything is serialized — the raw value never
     // reaches disk. See lib/redact.ts.
     redactor,
@@ -167,7 +177,7 @@ async function start(
     if (active) void stop();
   };
 
-  const stream = await openEventStream(id).catch((e) => {
+  const ndjson = await openEventStream(id).catch((e) => {
     console.warn('[bugcast] live event stream unavailable', e);
     return null;
   });
@@ -176,8 +186,9 @@ async function start(
     cdp,
     ctx,
     events,
-    stream,
-    pending: [],
+    ndjson,
+    bytesWritten: 0,
+    pending: pendingBeforeActive,
     writes: Promise.resolve(),
     // Batched every couple of seconds rather than written per event. Not a
     // micro-optimisation: the File System Access grant lapsing has been the
@@ -211,12 +222,9 @@ async function stop(): Promise<Response> {
   const { cdp, events, startedAt, redactor, title, startUrl, id, video } = active;
   await chrome.storage.local.set({ recording: false });
   clearInterval(active.flushTimer);
-  const stream = active.stream;
-  const finalFlush = flushEvents();
+  await flushEvents();
   active = null;
   setBadge(false);
-  await finalFlush;
-  await stream?.close().catch(() => {});
   await cdp.detach();
   await unregisterInteractionCapture();
 
@@ -531,8 +539,7 @@ async function unregisterInteractionCapture(): Promise<void> {
 function recordLiveSpeech(segments: Segment[] | undefined): void {
   if (!active || !segments?.length) return;
   for (const event of toSpeechEvents(segments, active.ctx.pageUrl)) {
-    active.events.push({ ...event, provisional: true });
-    active.pending.push(JSON.stringify({ ...event, provisional: true }));
+    recordEvent({ ...event, provisional: true });
   }
 }
 
@@ -546,7 +553,7 @@ function recordInteraction(msg: any): void {
   // message type and overwrites the event kind it is spread after.
   const { type: _messageType, kind, epochMs, startedAt, ...rest } = msg;
   const t = toSessionMs(epochMs, active.ctx.t0);
-  active.events.push({
+  recordEvent({
     type: kind,
     t: startedAt ? toSessionMs(startedAt, active.ctx.t0) : t,
     ...(startedAt ? { tEnd: t } : {}),
@@ -597,7 +604,7 @@ chrome.commands.onCommand.addListener((command) => {
  */
 function dropMarker(note: string): boolean {
   if (!active) return false;
-  active.events.push({
+  recordEvent({
     type: 'marker',
     t: toSessionMs(Date.now(), active.ctx.t0),
     pageUrl: active.ctx.pageUrl,
@@ -826,14 +833,15 @@ async function offscreenCheck(which: 'capture' | 'mic' | 'asr'): Promise<string>
 /** How often queued events reach disk. */
 const FLUSH_MS = 2_000;
 
-async function openEventStream(session: string): Promise<FileSystemWritableFileStream | null> {
+async function openEventStream(session: string): Promise<FileSystemFileHandle | null> {
   const dir = await storedSessionDirectory();
   if (!dir) return null;
   const folder = await dir.getDirectoryHandle(session, { create: true });
+  // Created empty up front so a reader can start following before the first
+  // batch, and so `isLive` sees the session immediately.
   const file = await folder.getFileHandle('events.ndjson', { create: true });
-  // One writable held open for the session. Its position advances with each
-  // write, so successive batches append rather than overwrite.
-  return file.createWritable();
+  await (await file.createWritable()).close();
+  return file;
 }
 
 /**
@@ -845,12 +853,41 @@ async function openEventStream(session: string): Promise<FileSystemWritableFileS
  */
 function flushEvents(): Promise<void> {
   const session = active;
-  if (!session?.stream || !session.pending.length) return session?.writes ?? Promise.resolve();
+  if (!session?.ndjson || !session.pending.length) return session?.writes ?? Promise.resolve();
 
   const batch = session.pending.join('\n') + '\n';
   session.pending = [];
-  session.writes = session.writes.then(() =>
-    session.stream!.write(batch).catch((e) => console.warn('[bugcast] event flush failed', e)),
-  );
+
+  session.writes = session.writes.then(async () => {
+    try {
+      // keepExistingData + seek, rather than a writable held open across the
+      // session: FSA only commits a writable's contents on close(), so holding
+      // one open leaves an empty file on disk until stop. Reopening per flush
+      // is what makes the stream actually readable while recording.
+      const writable = await session.ndjson!.createWritable({ keepExistingData: true });
+      await writable.seek(session.bytesWritten);
+      await writable.write(batch);
+      await writable.close();
+      session.bytesWritten += new TextEncoder().encode(batch).length;
+    } catch (e) {
+      console.warn('[bugcast] event flush failed', e);
+    }
+  });
   return session.writes;
+}
+
+/**
+ * The one place an event joins a session.
+ *
+ * Every path must go through here. Interactions, markers and live speech each
+ * used to call `events.push` directly, so they reached timeline.json and never
+ * reached events.ndjson — a stream that was quietly missing half the session,
+ * which the disk smoke caught by comparing the two counts.
+ */
+function recordEvent(event: TimelineEvent, events?: TimelineEvent[], pending?: string[]): void {
+  const list = events ?? active?.events;
+  const queue = pending ?? active?.pending;
+  if (!list) return;
+  list.push(event);
+  queue?.push(JSON.stringify(event));
 }

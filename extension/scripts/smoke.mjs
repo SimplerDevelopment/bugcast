@@ -128,6 +128,29 @@ console.log('target tabId:', tabId);
 const ext = await ctx.newPage();
 await ext.goto(`chrome-extension://${extId}/src/popup/index.html`);
 
+// Give the worker a real directory handle without a permission prompt.
+//
+// The origin private file system hands out the same FileSystemDirectoryHandle
+// interface as showDirectoryPicker, and needs no grant — so seeding it into
+// IndexedDB exercises the actual disk paths (streaming appends, session files,
+// the video flush) which otherwise cannot be tested at all, because the picker
+// is a native dialog no automation can drive.
+await ext.evaluate(async () => {
+  const opfs = await navigator.storage.getDirectory();
+  const dir = await opfs.getDirectoryHandle('sessions', { create: true });
+  await new Promise((resolve, reject) => {
+    const open = indexedDB.open('bugcast', 1);
+    open.onupgradeneeded = () => open.result.createObjectStore('handles');
+    open.onsuccess = () => {
+      const tx = open.result.transaction('handles', 'readwrite');
+      tx.objectStore('handles').put(dir, 'sessionDirectory');
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    };
+    open.onerror = () => reject(open.error);
+  });
+});
+
 const started = await ext.evaluate(
   ([type, tabId, pageUrl, title]) => chrome.runtime.sendMessage({ type, tabId, pageUrl, title }),
   ['bugcast/start-recording', tabId, `http://localhost:${PORT}/`, 'bugcast smoke'],
@@ -175,6 +198,29 @@ await target.evaluate(async (port) => {
 }, PORT);
 
 await target.waitForTimeout(1500);
+
+// Read the live stream while recording is still running. This is the whole
+// point of streaming, and it is the assertion that would have caught a writable
+// held open across the session — FSA only commits on close(), so that produced
+// an empty file until stop.
+const live = await ext.evaluate(async () => {
+  const opfs = await navigator.storage.getDirectory();
+  const dir = await opfs.getDirectoryHandle('sessions');
+  for await (const [name, handle] of dir.entries()) {
+    if (handle.kind !== 'directory') continue;
+    const file = await handle.getFileHandle('events.ndjson').catch(() => null);
+    if (!file) continue;
+    const text = await (await file.getFile()).text();
+    return { session: name, bytes: text.length, lines: text.trim().split('\n').filter(Boolean).length };
+  }
+  return null;
+});
+console.log('\n=== live stream (mid-recording) ===');
+console.log(live ? `${live.lines} events, ${live.bytes} bytes in ${live.session}/events.ndjson` : 'NOTHING WRITTEN YET');
+if (!live?.lines) {
+  console.error('FAIL: events.ndjson was empty while recording — the stream is not live');
+  process.exitCode = 1;
+}
 
 const stopped = await ext.evaluate(
   (type) => chrome.runtime.sendMessage({ type }),
@@ -321,11 +367,50 @@ console.log(JSON.stringify(stopped.capture ?? '(none)'));
 console.log('\n=== disk ===');
 console.log('sessionId:', stopped.sessionId);
 console.log('written:  ', stopped.written ?? `(nothing written: ${stopped.writeError})`);
-// No folder is chosen here, so this exercises the enterprise-policy fallback:
-// the session must still land somewhere, as a single zip in Downloads.
-if (!stopped.written?.includes('.zip')) {
-  console.error('FAIL: with no folder, the session should fall back to a zip');
+if (!stopped.written) {
+  console.error(`FAIL: the session was not written anywhere (${stopped.writeError})`);
   process.exitCode = 1;
+}
+
+// What actually landed on disk.
+const files = await ext.evaluate(async (id) => {
+  const opfs = await navigator.storage.getDirectory();
+  const dir = await opfs.getDirectoryHandle('sessions');
+  const folder = await dir.getDirectoryHandle(id).catch(() => null);
+  if (!folder) return null;
+  const out = [];
+  for await (const [name, handle] of folder.entries()) {
+    out.push(
+      handle.kind === 'file' ? `${name} (${(await handle.getFile()).size} bytes)` : `${name}/`,
+    );
+  }
+  return out.sort();
+}, stopped.sessionId);
+console.log('\n=== written to disk ===');
+console.log((files ?? ['(nothing)']).map((f) => '  ' + f).join('\n'));
+// The stream and the timeline must contain the same events. They diverged once —
+// interactions and markers pushed to the timeline directly and never reached the
+// stream, so events.ndjson was quietly missing half the session.
+const streamed = await ext.evaluate(async (id) => {
+  const opfs = await navigator.storage.getDirectory();
+  const dir = await opfs.getDirectoryHandle('sessions');
+  const folder = await dir.getDirectoryHandle(id);
+  const text = await (await (await folder.getFileHandle('events.ndjson')).getFile()).text();
+  return text.trim().split('\n').filter(Boolean).length;
+}, stopped.sessionId);
+console.log(`\nstream: ${streamed} lines vs timeline: ${stopped.events?.length} events`);
+// The timeline drops provisional speech at stop, so the stream may hold more —
+// never fewer.
+if (streamed < (stopped.events?.length ?? 0)) {
+  console.error('FAIL: events.ndjson is missing events that reached timeline.json');
+  process.exitCode = 1;
+}
+
+for (const required of ['session.json', 'timeline.json', 'report.md', 'events.ndjson']) {
+  if (!files?.some((f) => f.startsWith(required) && !f.includes('(0 bytes)'))) {
+    console.error(`FAIL: ${required} missing or empty`);
+    process.exitCode = 1;
+  }
 }
 
 // A cross-origin request with no ACAO must be recorded as a failure carrying

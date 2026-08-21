@@ -77,6 +77,17 @@ Every one of these was found the expensive way. Do not rediscover them.
 - **Text content is not an accessible name for a form control** — a `<select>`'s
   is every option concatenated. And a container's "name" identifies the whole
   page, so text selectors are leaf-only.
+- **`createWritable()` only commits on `close()`.** It writes to a temporary
+  swap file, so a writable held open across a session leaves an *empty file on
+  disk* until stop — the opposite of streaming. For anything meant to be read
+  live, reopen with `{keepExistingData: true}`, `seek()` to the end, write and
+  close on every flush. (Holding one open is still right for video.webm, which
+  nobody tails.)
+- **The smoke test writes to a real directory via OPFS.** `navigator.storage
+  .getDirectory()` hands out the same `FileSystemDirectoryHandle` interface with
+  no permission prompt, so seeding it into IndexedDB exercises the actual disk
+  paths that the picker otherwise makes untestable. It has already caught an
+  empty live stream and a stream missing half its events.
 - **`showDirectoryPicker` never exposes an absolute path**, and a
   `FileSystemDirectoryHandle` only survives in IndexedDB — `chrome.storage`
   serializes to JSON and would destroy it.
