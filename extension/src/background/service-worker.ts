@@ -52,7 +52,6 @@ interface Recording {
    */
   stream: Stream;
   writes: Promise<void>;
-  flushTimer: number;
   /**
    * Where the session began. Held separately because `ctx.pageUrl` is *current*
    * page context and navigation mutates it — reading it at stop time reported
@@ -200,9 +199,6 @@ async function start(
     events,
     stream: { ...stream, pending: [...beforeActive] },
     writes: Promise.resolve(),
-    // No shared interval: each stream schedules its own flush when something
-    // is queued, so events do not wait on a tick that has not come round yet.
-    flushTimer: 0,
     awake: keepAwake(),
     startedAt,
     redactor,
@@ -236,7 +232,6 @@ async function stop(): Promise<Response> {
   const { cdp, events, startedAt, redactor, title, startUrl, id, video } = active;
   await chrome.storage.local.set({ recording: false });
   clearInterval(active.awake);
-  clearInterval(active.flushTimer);
   await flushEvents();
   active = null;
   setBadge(false);
@@ -911,17 +906,29 @@ async function offscreenCheck(which: 'capture' | 'mic' | 'asr'): Promise<string>
 }
 
 /**
- * How long a stream waits before writing what it has.
+ * There is no flush timer, and there must not be one.
  *
- * Measured rather than guessed: one append costs 8-35ms and, importantly, does
- * **not** grow with file size — Chrome is not copying the file on each open, so
- * the original two-second batching was buying nothing. Events therefore write
- * essentially as they happen, coalescing only a burst.
+ * A 150ms debounce lived here and cost a measured **1251ms median** from click
+ * to bytes on disk. An MV3 service worker is dormant between extension events
+ * and does not service its timer queue on schedule: the overdue callback runs
+ * when the *next* event wakes the worker. Traced, one click per 1200ms —
  *
- * Speech stays slow on purpose. It arrives in bursts from ten-second windows,
- * so a short debounce would add wakeups without making anything fresher.
+ *     4073  queue click
+ *     5320  debounce timer FIRED     (scheduled for 4223; 1097ms late)
+ *     5320  queue click              (the wake that ran it was the next click)
+ *     5331  committed
+ *    11004  debounce timer FIRED     (3.2s after the last click — nothing else
+ *                                     came along to wake the worker)
+ *
+ * So every line waited for the event *after* it, and the last event of a burst
+ * waited indefinitely — which is exactly the event a tester cares about, the
+ * one they just triggered before turning to look at the transcript.
+ *
+ * The write itself was never the problem: 6-35ms, and it does not grow with
+ * file size. So flush in the same task the event arrived in, where the worker
+ * is provably awake because it is running this code, and let the serialised
+ * `writes` chain do the coalescing a debounce was there for — see below.
  */
-const DEBOUNCE_MS = 150;
 
 interface Stream {
   file: FileSystemFileHandle | null;
@@ -929,12 +936,12 @@ interface Stream {
   bytes: number;
   pending: string[];
   writes: Promise<void>;
-  /** Set while a flush is scheduled; the debounce coalesces a burst. */
-  timer: number | null;
+  /** Set while the pump is draining, so callers do not stack up chain links. */
+  flushing: boolean;
 }
 
 async function openStream(session: string, name: string): Promise<Stream> {
-  const empty: Stream = { file: null, bytes: 0, pending: [], writes: Promise.resolve(), timer: null };
+  const empty: Stream = { file: null, bytes: 0, pending: [], writes: Promise.resolve(), flushing: false };
   try {
     const dir = await storedSessionDirectory();
     if (!dir) return empty;
@@ -951,21 +958,17 @@ async function openStream(session: string, name: string): Promise<Stream> {
 }
 
 /**
- * Queue a line and schedule its stream's flush.
+ * Queue a line and write it, now, in this task.
  *
- * Per-stream rather than one shared timer, so a burst of narration cannot delay
- * an event reaching disk — which is the other half of the contention that
- * prompted splitting the outputs.
+ * Not scheduled, not debounced — see the note above `Stream`. The one moment an
+ * MV3 worker is guaranteed to be running is the moment it hands us an event, so
+ * that is when the write starts.
  */
 function queueLine(line: string): void {
   const stream = active?.stream;
   if (!stream) return;
   stream.pending.push(line);
-  if (stream.timer !== null) return;
-  stream.timer = setTimeout(() => {
-    stream.timer = null;
-    void flushStream(stream);
-  }, DEBOUNCE_MS) as unknown as number;
+  void flushStream(stream);
 }
 
 /**
@@ -981,29 +984,48 @@ function queueLine(line: string): void {
 function flushEvents(): Promise<void> {
   const session = active;
   if (!session) return Promise.resolve();
-  const stream = session.stream;
-  if (stream.timer !== null) {
-    clearTimeout(stream.timer);
-    stream.timer = null;
-  }
-  return flushStream(stream);
+  // Nothing to cancel: there is no pending timer to beat. Whatever is still in
+  // `pending` at stop either goes out on the in-flight pass or starts a new one.
+  return flushStream(session.stream);
 }
 
+/**
+ * Drain the queue, and keep draining while it refills.
+ *
+ * This is where the coalescing a debounce used to provide comes from, and it is
+ * strictly better at it: the batch is taken at *execution* time, so a lone event
+ * on a quiet page writes immediately, while a burst — forty network events from
+ * one page load — rides out in as few writes as the disk allows, because
+ * everything that arrives during a write is picked up by the next turn of the
+ * loop. Batch size tunes itself to how busy the page is; nobody has to guess a
+ * millisecond value that is wrong at both ends.
+ *
+ * `flushing` is the whole guard. Without it every queued line appends another
+ * link to the promise chain, each holding a batch captured when it was *called*
+ * — which is a one-line write per event, the thing the debounce was protecting
+ * against.
+ */
 function flushStream(stream: Stream): Promise<void> {
-  if (!stream.file || !stream.pending.length) return stream.writes;
-
-  const batch = stream.pending.join('\n') + '\n';
-  stream.pending = [];
+  if (stream.flushing || !stream.file || !stream.pending.length) return stream.writes;
+  stream.flushing = true;
 
   stream.writes = stream.writes.then(async () => {
     try {
-      const writable = await stream.file!.createWritable({ keepExistingData: true });
-      await writable.seek(stream.bytes);
-      await writable.write(batch);
-      await writable.close();
-      stream.bytes += new TextEncoder().encode(batch).length;
+      while (stream.pending.length) {
+        const batch = stream.pending.join('\n') + '\n';
+        stream.pending = [];
+        const writable = await stream.file!.createWritable({ keepExistingData: true });
+        await writable.seek(stream.bytes);
+        await writable.write(batch);
+        await writable.close();
+        stream.bytes += new TextEncoder().encode(batch).length;
+      }
     } catch (e) {
       console.warn('[bugcast] flush failed', e);
+    } finally {
+      // Must clear even on a throw, or one failed write silences the stream for
+      // the rest of the session.
+      stream.flushing = false;
     }
   });
   return stream.writes;
