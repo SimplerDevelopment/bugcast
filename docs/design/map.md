@@ -314,14 +314,18 @@ the destination is a working published repo, not a spec.
   confound (ticket 17); CDP
   Network/Runtime attach overhead; VP8 vs VP9 vs AV1 encode cost at 15fps; MV3
   service-worker keepalive best practice in 2026; File System Access append
-  throughput; and whether a byte-offset cursor measurably beats the line cursor
-  at realistic session sizes. **What *is* measured** lives in the code that
+  throughput. **What *is* measured** lives in the code that
   earned it: append cost is flat at 8-35ms from 2KB to 680KB
   (`scripts/flush-probe.mjs`); a 150ms debounce cost a 1251ms median
   click-to-disk because MV3 does not service timers while dormant (`f07f9b0`);
-  MediaRecorder t0 skew is one frame interval (ticket 13). The rule this
-  section exists to enforce: a perf change lands with its probe, or it does not
-  land.
+  MediaRecorder t0 skew is one frame interval (ticket 13). And **the byte-offset
+  cursor question is answered — leave it alone** (`mcp/scripts/tail-probe.mjs`):
+  a realistic 500-event session costs **42ms for the entire follow-loop**,
+  0.42ms per wake. The O(n²) is real but only bites a pathological 10k-event
+  session, which spends 12s of CPU across the whole recording, about 1.3% of one
+  core — not worth trading away a cursor that cannot land mid-record. The rule
+  this section exists to enforce: a perf change lands with its probe, or it does
+  not land — and sometimes the probe says the change should not land at all.
 
 - **Which transcription backend is actually faster here.** One primary benchmark
   found WASM beating WebGPU for Whisper, contradicting vendor claims. Must be
