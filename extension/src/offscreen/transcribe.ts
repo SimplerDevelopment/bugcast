@@ -51,13 +51,61 @@ export const DEVICE = 'wasm';
  * decoder q4}` was the first choice, purely on download size, and transcription
  * quality was reported as poor.
  *
- * The **q8 decoder** is separately broken — not a uniform q8 config, as first
- * assumed. Any config using `decoder_model_merged: 'q8'` fails session creation
- * with "Missing required scale ... TransposeDQWeightsForMatMulNBits", which
- * reads like a corrupt download and is a dtype mismatch. Verified working on
- * real hardware: all-`fp32`, all-`q4`, `{q8, q4}` and this.
+ * **Why `decoder_model_merged: 'q8'` fails, corrected.** This comment used to
+ * say the q8 decoder is "separately broken", which named the symptom and got
+ * the cause wrong. It is not a quantization problem and not a corrupt download:
+ * ONNX Runtime 1.25 regressed the DQ→MatMulNBits fusion so that two DQ nodes
+ * sharing the same weight and scale initializers — Whisper's tied embeddings —
+ * crash the second fusion. Fixed upstream by onnxruntime PR #28326 (merged
+ * 2026-05-12), but no installable transformers.js release carries the fix yet,
+ * so the failure is real for us regardless.
+ *
+ * The bug is **bit-width agnostic**: its regression tests cover Int4x2 and
+ * UInt4x2, so q4 is empirically-unreported rather than proven immune. Verified
+ * working on real hardware: all-`fp32`, all-`q4`, `{q8, q4}` and this.
  */
 export const DTYPE = { encoder_model: 'fp32', decoder_model_merged: 'q4' };
+
+/**
+ * The session names transformers.js will actually look this dtype up by.
+ *
+ * Whisper is a Seq2Seq model, so the library resolves per-module dtype against
+ * exactly these two file names.
+ */
+const DTYPE_KEYS = ['encoder_model', 'decoder_model_merged'] as const;
+
+/**
+ * Refuse a dtype key the library would silently downgrade.
+ *
+ * transformers.js resolves per-module dtype by `hasOwnProperty(fileName)`. On a
+ * miss it does not throw — it sets the module to the device default, which on
+ * the WASM path is **q8**. So a single typo in `DTYPE` above (`decoder_merged`,
+ * `encoder`, a renamed session in a future release) silently produces the one
+ * configuration documented above as failing, and the only signal is a
+ * `logger.info` line nobody reads.
+ *
+ * That is the exact shape refuse-don't-degrade exists to stop: a quiet
+ * substitution that surfaces later as an opaque session-creation error looking
+ * like a corrupt model download. One assertion at startup costs nothing and
+ * turns it into a sentence that names the fix.
+ */
+export function assertDtypeKeys(dtype: unknown): void {
+  const keys = Object.keys((dtype ?? {}) as Record<string, unknown>);
+  const unknownKeys = keys.filter((k) => !DTYPE_KEYS.includes(k as never));
+  if (unknownKeys.length) {
+    throw new Error(
+      `Unknown dtype key(s) ${unknownKeys.join(', ')} — transformers.js would silently ` +
+        `fall back to q8 on wasm, which fails Whisper session creation. Expected: ${DTYPE_KEYS.join(', ')}.`,
+    );
+  }
+  const missing = DTYPE_KEYS.filter((k) => !keys.includes(k));
+  if (missing.length) {
+    throw new Error(
+      `Missing dtype key(s) ${missing.join(', ')} — those modules would default to q8 on wasm, ` +
+        'which fails Whisper session creation.',
+    );
+  }
+}
 
 /** Below this there is no speech worth a model download. */
 export const MIN_SAMPLES = 16_000; // one second
@@ -160,6 +208,10 @@ const inflight = new Map<number, (value: { chunks: any[]; text: string; error?: 
  */
 function ensureWorker(tier: ModelTier, dtype: unknown): Promise<void> {
   if (loaded) return loaded;
+
+  // Before the model download, not after: the failure this prevents otherwise
+  // surfaces minutes later as an opaque session-creation error.
+  assertDtypeKeys(dtype);
 
   // Checked here rather than in the worker: this side has the extension APIs,
   // and a missing runtime should say so instead of surfacing as an opaque

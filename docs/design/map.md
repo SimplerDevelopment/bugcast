@@ -312,7 +312,24 @@ the destination is a working published repo, not a spec.
   CDP
   Network/Runtime attach overhead; VP8 vs VP9 vs AV1 encode cost at 15fps; MV3
   service-worker keepalive best practice in 2026; File System Access append
-  throughput. **What *is* measured** lives in the code that
+  throughput (including whether `FileSystemSyncAccessHandle` beats
+  `createWritable`+seek, and whether the swap-file commit that makes a concurrent
+  reader throw `NotFoundError`/`NotReadableError` mid-write is documented
+  anywhere); Claude Skills authoring and distribution, which leaves ticket 11's
+  "ship no skill" decision un-evidenced in both directions; and what comparable
+  tools capture that we do not. **A second research pass (Aug 2026) tried all
+  four and returned nothing on any of them** — every verifier exhausted its
+  search budget — so these are open by measurement failure, not by neglect.
+  Two things it *did* settle are worth keeping: the Web Speech API cannot serve
+  the live pass, because `SpeechRecognition.processLocally` **defaults to false**
+  and the spec then permits remote processing — zero-network would be violated by
+  default rather than by mistake (setting it true fails loudly instead of falling
+  back, which at least fits refuse-don't-degrade). And the q8 decoder failure is
+  not a quantization bug at all: ONNX Runtime 1.25 regressed the DQ→MatMulNBits
+  fusion for two DQ nodes sharing weight+scale initializers — Whisper's tied
+  embeddings — fixed upstream 2026-05-12 but not yet in any installable
+  transformers.js. It is bit-width agnostic, so q4 is unreported rather than
+  immune. **What *is* measured** lives in the code that
   earned it: append cost is flat at 8-35ms from 2KB to 680KB
   (`scripts/flush-probe.mjs`); a 150ms debounce cost a 1251ms median
   click-to-disk because MV3 does not service timers while dormant (`f07f9b0`);
@@ -333,11 +350,26 @@ the destination is a working published repo, not a spec.
   with its probe, or it does not land — and sometimes the probe says the change
   should not land at all.
 
-- **Which transcription backend is actually faster here.** One primary benchmark
-  found WASM beating WebGPU for Whisper, contradicting vendor claims. Must be
-  measured inside a real MV3 offscreen document before release. **Now has a home:**
-  ticket 12's first-run self-test runs the model against a bundled clip, which is
-  the first real measurement on that machine.
+- **Which transcription backend is actually faster here.** **Researched Aug 2026,
+  and the honest answer is that nobody knows.** There is no primary benchmark in
+  either direction for transformers.js v4 Whisper WebGPU-vs-WASM: the famous
+  "up to 100x faster than WASM" is a v3 launch-post highlights bullet with no
+  numbers, no hardware and no methodology (full-text checked — "100x" appears
+  exactly once and every benchmark keyword returns zero hits), and the
+  maintainer's "v4 mostly fixes this" was posted twelve days before v4 shipped,
+  with no timing, model or hardware. The earlier "WASM beat WebGPU on M2" finding
+  **did not survive** — the same reporter measured WebGPU winning 1.9x on the
+  same machine once off an alpha build.
+  **`DEVICE = 'wasm'` stays anyway, and not for a speed reason:** transformers.js
+  4.2.0 + onnxruntime-web 1.26.0 — the exact pin — leaks ~650 MB of GPU memory
+  per 30-second Whisper chunk on the WebGPU path, reclaimed only on page close.
+  For a rolling-window recorder in an offscreen document that is never reloaded,
+  that is disqualifying on its own. Revisit when the leak is fixed, not when the
+  next speed claim appears.
+  Still unanswered and load-bearing if it ever is revisited: **whether
+  `navigator.gpu` is even present in an MV3 offscreen document** under our CSP.
+  No evidence either way was found. `Boolean(navigator.gpu)` would be the wrong
+  test regardless — only an awaited `requestAdapter()` proves usability.
 - **`chrome.tabCapture` frame cadence on a static page.** tabCapture is
   paint-driven, so a static page delivers sparse frames. Spike 13 removed the
   frame-0-as-anchor worry (anchor on `Date.now()` at `start()`), and 08's frame
