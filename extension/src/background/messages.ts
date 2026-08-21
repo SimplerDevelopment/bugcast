@@ -1,3 +1,4 @@
+export const MODEL_PROGRESS = 'bugcast/model-progress';
 export const LIVE_SPEECH = 'bugcast/live-speech';
 export const OFFSCREEN_FLUSH_VIDEO = 'bugcast/offscreen-flush-video';
 export const OFFSCREEN_ZIP = 'bugcast/offscreen-zip';

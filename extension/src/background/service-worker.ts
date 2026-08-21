@@ -13,6 +13,7 @@ import { loadSettings } from '../lib/settings';
 import type { RedactionSummary } from '../lib/redact';
 import {
   DROP_MARKER,
+  MODEL_PROGRESS,
   LIVE_SPEECH,
   OFFSCREEN_SELF_TEST,
   RUN_SELF_TEST,
@@ -88,6 +89,13 @@ async function handle(msg: any): Promise<Response> {
       return { ok: true, recording: active !== null };
     case RUN_SELF_TEST:
       return { ok: true, recording: active !== null, checks: await selfTest(msg.only) } as never;
+    case MODEL_PROGRESS:
+      // Relayed rather than handled: the offscreen document cannot reach the
+      // popup directly, and storage is what the popup already reads.
+      await chrome.storage.local.set({
+        modelProgress: { percent: msg.percent, mb: msg.mb, at: Date.now() },
+      });
+      return { ok: true, recording: active !== null };
     case LIVE_SPEECH:
       recordLiveSpeech(msg.segments);
       return { ok: true, recording: active !== null };
@@ -820,19 +828,37 @@ async function selfTest(only?: string[]): Promise<unknown> {
   return results;
 }
 
+/**
+ * A check that never returns is worse than one that fails.
+ *
+ * The speech check downloads a model, so it gets minutes; everything else
+ * should be near-instant and a hang there means something is wrong. Without
+ * this the self-test simply sat on "Running…" forever, which is
+ * indistinguishable from the tool being broken.
+ */
+const CHECK_TIMEOUT_MS: Record<string, number> = { asr: 10 * 60_000 };
+
 async function offscreenCheck(which: 'capture' | 'mic' | 'asr'): Promise<string> {
   await ensureOffscreen();
   const tier = await storedTier();
   const res = await whileAlive(() =>
-    chrome.runtime.sendMessage({
-      target: 'offscreen',
-      type: OFFSCREEN_SELF_TEST,
-      check: which,
-      tier,
-    }),
+    Promise.race([
+      chrome.runtime.sendMessage({
+        target: 'offscreen',
+        type: OFFSCREEN_SELF_TEST,
+        check: which,
+        tier,
+      }),
+      new Promise((_, reject) =>
+        setTimeout(
+          () => reject(new Error(`Timed out after ${(CHECK_TIMEOUT_MS[which] ?? 60_000) / 1000}s`)),
+          CHECK_TIMEOUT_MS[which] ?? 60_000,
+        ),
+      ),
+    ]),
   );
-  if (!res || res.error) throw new Error(res?.error ?? 'No response from the recorder');
-  return res.detail as string;
+  if (!res || (res as any).error) throw new Error((res as any)?.error ?? 'No response from the recorder');
+  return (res as any).detail as string;
 }
 
 /** How often queued events reach disk. */

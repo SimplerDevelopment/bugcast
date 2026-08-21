@@ -51,6 +51,8 @@ export function App() {
     video?: boolean; videoBytes?: number;
   } | null>(null);
   const [testing, setTesting] = useState(false);
+  const [running, setRunning] = useState<string | null>(null);
+  const [progress, setProgress] = useState<string | null>(null);
   const [mic, setMic] = useState<PermissionState | 'unknown'>('unknown');
   const [shortcuts, setShortcuts] = useState<chrome.commands.Command[]>([]);
 
@@ -80,6 +82,15 @@ export function App() {
       // Chrome drops a suggested shortcut that collides with its own and says
       // nothing, so the only way to know whether one exists is to ask.
       void chrome.commands.getAll().then(setShortcuts).catch(() => {});
+      // The download happens in a background document, so progress reaches the
+      // popup through storage — which also means it survives the popup closing.
+      const onChange = (changes: Record<string, chrome.storage.StorageChange>) => {
+        if (changes.modelProgress) {
+          const v = changes.modelProgress.newValue;
+          setProgress(v ? `${v.percent}% of ~${v.mb} MB` : null);
+        }
+      };
+      chrome.storage.local.onChanged.addListener(onChange);
       void navigator.permissions
         .query({ name: 'microphone' as PermissionName })
         .then((p) => setMic(p.state))
@@ -95,11 +106,26 @@ export function App() {
 
   const selfTest = useCallback(async () => {
     setTesting(true);
-    setChecks(null);
+    setChecks([]);
+    // One at a time, so results appear as they land. Running all five and
+    // rendering at the end meant the speech check — which downloads a model and
+    // can take minutes — made the whole thing look frozen.
+    const order: Array<[CheckResult['id'], string]> = [
+      ['cdp', 'Debugger'],
+      ['disk', 'Sessions folder'],
+      ['capture', 'Tab capture'],
+      ['mic', 'Microphone'],
+      ['asr', 'Speech model'],
+    ];
     try {
-      const res = await chrome.runtime.sendMessage({ type: RUN_SELF_TEST });
-      setChecks((res?.checks as CheckResult[]) ?? null);
+      for (const [id, label] of order) {
+        setRunning(label);
+        const res = await chrome.runtime.sendMessage({ type: RUN_SELF_TEST, only: [id] });
+        const [result] = (res?.checks as CheckResult[]) ?? [];
+        if (result) setChecks((prev) => [...(prev ?? []), result]);
+      }
     } finally {
+      setRunning(null);
       setTesting(false);
     }
   }, []);
@@ -351,8 +377,15 @@ export function App() {
           disabled={testing || recording}
           className="text-xs text-neutral-500 underline hover:text-neutral-900 disabled:no-underline disabled:opacity-50"
         >
-          {testing ? 'Running self-test…' : 'Run self-test'}
+          {testing ? `Running${running ? `: ${running}…` : '…'}` : 'Run self-test'}
         </button>
+        {running === 'Speech model' && (
+          <p className="mt-2 text-[11px] leading-snug text-neutral-500">
+            {progress === null
+              ? 'Downloading the speech model — a few minutes on a slow connection.'
+              : `Downloading the speech model — ${progress}`}
+          </p>
+        )}
         {checks && (
           <ul className="mt-2 space-y-1">
             {checks.map((c) => (

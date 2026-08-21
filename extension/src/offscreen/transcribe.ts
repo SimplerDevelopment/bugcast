@@ -101,6 +101,55 @@ async function assertRuntimePresent(): Promise<void> {
 
 let cached: Promise<any> | null = null;
 
+/**
+ * Report download progress.
+ *
+ * The first run fetches ~105MB for base.en, and without this the UI showed
+ * "Running…" for minutes — indistinguishable from a hang, which is exactly how
+ * it was reported. A number moving is the difference between waiting and
+ * assuming something is broken.
+ */
+const downloading = new Map<string, { loaded: number; total: number }>();
+
+function reportProgress(event: {
+  status?: string;
+  file?: string;
+  loaded?: number;
+  total?: number;
+}): void {
+  if (!event?.file) return;
+  if (event.status === 'progress' && typeof event.total === 'number') {
+    downloading.set(event.file, { loaded: event.loaded ?? 0, total: event.total });
+  } else if (event.status === 'done') {
+    const entry = downloading.get(event.file);
+    if (entry) entry.loaded = entry.total;
+  } else {
+    return;
+  }
+
+  // Aggregated across files, not per-file. Several download in parallel and
+  // each reports its own percentage, so forwarding those directly produced
+  // 0 -> 10 -> 82 -> 35 — a number going backwards reads as a bug.
+  let loaded = 0;
+  let total = 0;
+  for (const entry of downloading.values()) {
+    loaded += entry.loaded;
+    total += entry.total;
+  }
+  // The config and tokenizer files are a few KB and finish before the weights
+  // start, so an aggregate over only those reads as 100% before the real
+  // download has begun. Wait until there is something worth reporting.
+  if (total < 1_000_000) return;
+
+  void chrome.runtime
+    .sendMessage({
+      type: 'bugcast/model-progress',
+      percent: Math.min(100, Math.round((loaded / total) * 100)),
+      mb: Math.round(total / 1_000_000),
+    })
+    .catch(() => {});
+}
+
 async function load(tier: ModelTier, dtype: unknown = DTYPE): Promise<any> {
   const { env, pipeline } = await import('@huggingface/transformers');
 
@@ -142,6 +191,7 @@ async function load(tier: ModelTier, dtype: unknown = DTYPE): Promise<any> {
   return pipeline('automatic-speech-recognition', MODELS[tier], {
     device: DEVICE as never,
     dtype: dtype as never,
+    progress_callback: reportProgress as never,
   });
 }
 

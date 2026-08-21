@@ -244,7 +244,7 @@ console.log('\n=== self-test (asr excluded — it downloads a model) ===');
 // Not `asr`: it downloads a speech model, which is exactly what that check is
 // for and several minutes nobody wants on every push.
 const selfTest = await ext.evaluate(
-  (type) => chrome.runtime.sendMessage({ type, only: ['cdp', 'disk', 'capture'] }),
+  (type) => chrome.runtime.sendMessage({ type, only: ['cdp', 'disk', 'capture', 'mic'] }),
   'bugcast/run-self-test',
 );
 for (const c of selfTest?.checks ?? []) {
