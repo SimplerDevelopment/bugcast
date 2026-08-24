@@ -111,7 +111,7 @@ interrupt you for:
 
 | Pushed | Not pushed |
 |---|---|
-| Moments the tester marked (⌘⇧M) | Clicks, navigations, focus, typing |
+| Moments the tester marked (⌘⇧E) | Clicks, navigations, focus, typing |
 | Uncaught exceptions | Successful requests |
 | Console errors | Ordinary console output |
 | Failed requests, with response bodies | Provisional speech (it changes under you) |
