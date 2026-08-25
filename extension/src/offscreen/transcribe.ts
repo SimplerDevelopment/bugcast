@@ -18,6 +18,12 @@
 import type { Segment } from '../lib/srt';
 
 export interface TranscriptionEngine {
+  /**
+   * What this engine is, for the measurement line and for tests that need to
+   * assert which one was chosen without starting it. The local engines report
+   * their tier; the hosted one reports its model.
+   */
+  readonly name: string;
   /** @param samples mono PCM at 16kHz. @param t0Offset ms of session before audio began. */
   transcribe(samples: Float32Array, t0Offset: number): Promise<Segment[]>;
 }
@@ -260,6 +266,7 @@ export function transformersEngine(
   dtype: unknown = DTYPE,
 ): TranscriptionEngine {
   return {
+    name: tier,
     async transcribe(samples, t0Offset) {
       // No speech simply means no .srt. Mic is optional by design and must
       // never cost the recording.

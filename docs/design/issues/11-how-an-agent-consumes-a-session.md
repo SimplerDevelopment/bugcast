@@ -40,7 +40,7 @@ runtime — so the two must not be allowed to become one story.
 
 | | Requires |
 |---|---|
-| **Record a session** | Load the extension. No runtime, no native dependency, zero network calls. |
+| **Record a session** | Load the extension. No runtime, no native dependency, zero network calls — unless you opt into hosted transcription ([07](07-transcription-architecture-decision.md)), which is off by default. |
 | **Let an agent query sessions** | Optional. `npx -y video-qa-mcp` in an MCP config block. |
 
 The non-negotiable was that **core function** is fully local and dependency-free.

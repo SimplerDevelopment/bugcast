@@ -46,7 +46,9 @@ export function Options() {
       <header>
         <h1 className="text-lg font-semibold">Bugcast settings</h1>
         <p className="text-sm text-neutral-500">
-          Everything runs on this machine. Nothing is uploaded.
+          {settings.openaiApiKey
+            ? 'Session audio is sent to OpenAI for transcription. Everything else stays on this machine.'
+            : 'Everything runs on this machine. Nothing is uploaded.'}
         </p>
       </header>
 
@@ -93,7 +95,38 @@ export function Options() {
       </Section>
 
       <Section title="Transcription">
-        <Field label="Model">
+        <Field label="OpenAI API key">
+          <input
+            type="password"
+            value={settings.openaiApiKey}
+            onChange={(e) => void set('openaiApiKey', e.target.value)}
+            // Asked for on the way out of the field, not per keystroke.
+            //
+            // An extension only bypasses CORS for hosts it holds permission
+            // for, and `optional_host_permissions` grants nothing until it is
+            // requested — so without this the POST to OpenAI depends entirely
+            // on their response headers permitting a chrome-extension origin.
+            // The tests inject a fake fetch, so that dependency was never
+            // exercised. Requesting it here keeps the install prompt clean for
+            // everyone who never pastes a key.
+            onBlur={() => {
+              if (!settings.openaiApiKey.trim()) return;
+              void chrome.permissions.request({ origins: ['https://api.openai.com/*'] });
+            }}
+            placeholder="sk-… — leave empty to transcribe locally"
+            spellCheck={false}
+            autoComplete="off"
+            className="w-full rounded border border-neutral-300 px-2 py-1 font-mono text-sm"
+          />
+          <p className="mt-1 text-xs text-neutral-500">
+            Far more accurate on names and ticket ids, and it does not fall into the repetition
+            loops the local model does. <strong>Your audio leaves this machine</strong> — it is sent
+            to OpenAI and billed to your account. Stored on this device only; it is never bundled
+            into the extension.
+          </p>
+        </Field>
+
+        <Field label={settings.openaiApiKey ? 'Local model (used for the live pass)' : 'Model'}>
           <select
             value={settings.modelTier}
             onChange={(e) => void set('modelTier', e.target.value as ModelTier)}
@@ -106,7 +139,9 @@ export function Options() {
             ))}
           </select>
           <p className="mt-1 text-xs text-neutral-500">
-            Downloads once and is cached. Changing tier downloads the new one on the next recording.
+            {settings.openaiApiKey
+              ? 'Still used while recording, for the provisional narration an agent can follow live — that pass is replaced at stop and is not worth paying for twice. The transcript you keep comes from OpenAI. Turn off transcribe-while-recording above if you would rather not download this at all.'
+              : 'Downloads once and is cached. Changing tier downloads the new one on the next recording.'}
           </p>
         </Field>
       </Section>

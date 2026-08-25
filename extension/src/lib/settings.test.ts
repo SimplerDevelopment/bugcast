@@ -21,4 +21,12 @@ describe('defaults', () => {
   it('defaults to the middle model tier', () => {
     expect(DEFAULTS.modelTier).toBe('base.en');
   });
+
+  it('ships no transcription key, so audio stays on the machine', () => {
+    // map.md gave up a stated non-goal ("anything hosted") on the promise that
+    // this defaults to empty. A non-empty default would upload a user's
+    // narration without them ever asking, which is the one failure here that
+    // cannot be taken back.
+    expect(DEFAULTS.openaiApiKey).toBe('');
+  });
 });

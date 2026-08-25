@@ -25,7 +25,14 @@ import { advance, availableSamples, flatten, newCursor } from '../lib/pcm';
 import { cleanSegments, toSpeechEvents } from '../lib/srt';
 import type { PlannedFrame } from '../lib/frames';
 import { extractFrames } from './frames';
-import { DEFAULT_TIER, DEVICE, transformersEngine, type ModelTier } from './transcribe';
+import {
+  DEFAULT_TIER,
+  DEVICE,
+  transformersEngine,
+  type ModelTier,
+  type TranscriptionEngine,
+} from './transcribe';
+import { selectEngine } from './hosted';
 import {
   CHUNK_MS,
   pickMimeType,
@@ -78,6 +85,53 @@ let lastBuffered: Blob[] = [];
 
 /** Set at start, because it cannot be read from here. */
 let tier: ModelTier = DEFAULT_TIER;
+
+/** Set at start, same reason as `tier`. Empty means transcribe locally. */
+let apiKey = '';
+
+/**
+ * Hosted when a key is configured, local otherwise.
+ *
+ * Not a fallback chain. A hosted failure throws rather than quietly retrying
+ * locally, because the local path is a ~105MB model download this session has
+ * deliberately not paid for — starting one mid-recording to rescue a failed
+ * window would cost more than the window. A failed live window is lost and the
+ * next one continues; a failed pass at stop is recorded as `transcriptError`.
+ */
+/**
+ * The authoritative pass — hosted when a key is set, local otherwise.
+ *
+ * This is the one whose text survives: provisional lines are replaced wholesale
+ * at stop, so this is where accuracy is worth paying for.
+ */
+function finalEngine(): TranscriptionEngine {
+  return selectEngine(apiKey, tier);
+}
+
+/**
+ * The live pass is local, always, even with a key set.
+ *
+ * Running it hosted uploaded the session twice — every 30s window, and then the
+ * whole recording again at stop — for output that is discarded by construction:
+ * every live line is `provisional` and superseded. Twelve minutes of narration
+ * billed as twenty-four, and the extra twelve bought nothing.
+ *
+ * It also happens to be the right split on the merits. The live pass is the
+ * approximate one by design; the local model is the approximate engine. Cheap
+ * and now, then accurate at stop.
+ */
+function liveEngine(): TranscriptionEngine {
+  return transformersEngine(tier);
+}
+
+/**
+ * Consecutive live-window failures.
+ *
+ * A bad key fails identically every time, so one report is the whole story and
+ * a report per window would be thirty of them.
+ */
+let liveFailures = 0;
+const LIVE_FAILURE_REPORT_AT = 2;
 
 /**
  * Rolling live transcription.
@@ -149,8 +203,9 @@ async function transcribeLiveWindow(state: Live): Promise<void> {
     // transcribes this same buffer, from the beginning of the session.
     advance(state.pcm, to, cursor);
 
+    const active = liveEngine();
     const segments = cleanSegments(
-      await transformersEngine(tier).transcribe(window, (from / 16_000) * 1000),
+      await active.transcribe(window, (from / 16_000) * 1000),
     );
 
     // Measured, because "the live pass is slow" was a complaint nobody had a
@@ -161,16 +216,32 @@ async function transcribeLiveWindow(state: Live): Promise<void> {
     console.debug(
       `[bugcast] live window ${(from / 16_000).toFixed(0)}s–${(to / 16_000).toFixed(0)}s: ` +
         `${took}ms for ${covers}ms of audio (${(took / covers).toFixed(2)}x realtime, ` +
-        `${segments.length} segments, ${tier})${took > covers ? ' — LOSING GROUND' : ''}`,
+        `${segments.length} segments, ${active.name})${took > covers ? ' — LOSING GROUND' : ''}`,
     );
+    liveFailures = 0;
     if (segments.length) {
       appendSpeech(
         toSpeechEvents(segments, '').map((e) => JSON.stringify({ ...e, provisional: true })),
       );
     }
-  } catch {
-    // A failed window costs that window and nothing else. The authoritative
-    // pass at stop reads the whole audio regardless.
+  } catch (e) {
+    // A failed window still costs that window and nothing else — the
+    // authoritative pass at stop reads the whole audio regardless. What changed
+    // is that it no longer costs the *reason*.
+    //
+    // This block used to be bare. It was written when the only engine was local
+    // and a failure meant a bad thirty seconds of audio; it now also catches a
+    // typo'd API key, an expired one, and a rate limit — none of which are
+    // transient, all of which produce ten minutes of silence and no explanation
+    // if nobody is told. AGENTS.md: refuse, don't degrade.
+    liveFailures++;
+    console.warn(`[bugcast] live window ${(from / 16_000).toFixed(0)}s failed`, e);
+    if (liveFailures === LIVE_FAILURE_REPORT_AT) {
+      void chrome.runtime.sendMessage({
+        type: OFFSCREEN_ERROR,
+        error: `Live transcription is failing: ${String((e as Error)?.message ?? e)}`,
+      });
+    }
   } finally {
     liveBusy = false;
   }
@@ -207,6 +278,8 @@ async function start(msg: {
    * the truth. Same reason the popup passes tabId and pageUrl to the worker.
    */
   tier: ModelTier;
+  /** Same reason as `tier`. Empty means transcribe locally. */
+  openaiApiKey?: string;
   /** Empty means the system default input. */
   micDeviceId?: string;
   liveTranscription?: boolean;
@@ -256,6 +329,7 @@ async function start(msg: {
   // one that used to lose the video entirely.
   speechStream = await openSpeechStream(msg.sessionId).catch(() => null);
   liveOffset = 0;
+  liveFailures = 0;
   cursor = newCursor();
 
   let streamError: string | null = null;
@@ -312,6 +386,7 @@ async function start(msg: {
 
   live = state;
   tier = msg.tier ?? DEFAULT_TIER;
+  apiKey = msg.openaiApiKey ?? '';
   return {
     type: OFFSCREEN_STARTED,
     t0,
@@ -362,7 +437,7 @@ async function stop(): Promise<unknown> {
   let segments: ReturnType<typeof cleanSegments> = [];
   let transcriptError: string | null = null;
   try {
-    segments = cleanSegments(await transformersEngine(tier).transcribe(samples, 0));
+    segments = cleanSegments(await finalEngine().transcribe(samples, 0));
   } catch (e) {
     // No speech means no .srt, and a transcription failure must not cost the
     // session — every other artifact is already complete by this point.

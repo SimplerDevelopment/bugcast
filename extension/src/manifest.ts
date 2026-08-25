@@ -27,7 +27,11 @@ export default defineManifest({
   // `activeTab` covers executeScript on the current page but cannot back
   // registerContentScripts, which is what keeps interaction capture alive
   // across navigations during a session.
-  optional_host_permissions: ['<all_urls>'],
+  // `<all_urls>` covers the page under test, granted per-tab by the popup.
+  // api.openai.com is named separately because it is a different bargain: not
+  // the site you chose to record, but a third party your audio is sent to, and
+  // only if you paste a key. Requested from Options, never at install.
+  optional_host_permissions: ['<all_urls>', 'https://api.openai.com/*'],
 
   // MV3's default CSP forbids WebAssembly outright — the failure is a
   // CompileError saying "neither 'wasm-eval' nor 'unsafe-eval' is an allowed

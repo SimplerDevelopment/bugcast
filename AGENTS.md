@@ -36,9 +36,16 @@ complete; a gap in it is a real finding.
 
 Breaking any of these is a bug even if every test passes.
 
-- **Fully local.** Core recording makes zero network calls. No account, no
-  upload, no telemetry. The only network access anywhere is the one-time Whisper
-  model download, which has an offline path.
+- **Local by default, and never silently otherwise.** Core recording makes zero
+  network calls. No account, no upload, no telemetry. Two things reach the
+  network, and both are the user's decision: the one-time Whisper model
+  download, which has an offline path, and — only if a key is pasted into
+  Settings — session audio to OpenAI for transcription. The key is the opt-in;
+  there is no default that sends audio anywhere, the host permission is
+  requested at the moment the key is set rather than at install, and the live
+  pass stays local regardless so that opting in cannot double what it costs.
+  Anything that would widen this list is a design decision, not an
+  implementation detail.
 - **Redaction runs in memory, before serialization.** The raw value never
   reaches disk. `NO_REDACTION` must have no call sites outside its own file.
 - **Refuse, don't degrade.** A session missing network or console is

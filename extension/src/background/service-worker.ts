@@ -28,7 +28,7 @@ import {
   START_RECORDING,
   STOP_RECORDING,
   type Response,
-} from './messages';
+  OFFSCREEN_ERROR,} from './messages';
 import { toSessionMs } from '../lib/time';
 
 interface Recording {
@@ -259,6 +259,19 @@ async function start(
     micError: capture ? capture.micError : null,
   };
 }
+
+/**
+ * Trouble reported by the offscreen document, kept where the popup can find it.
+ *
+ * `OFFSCREEN_ERROR` was defined and sent but never listened for, so a recorder
+ * error and a failing transcription engine both went nowhere. Persisted rather
+ * than only relayed, because the popup closes the moment you click the page you
+ * are testing — which is the entire recording.
+ */
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg?.type !== OFFSCREEN_ERROR) return;
+  void chrome.storage.local.set({ liveError: String(msg.error ?? 'Unknown error') });
+});
 
 async function stop(): Promise<Response> {
   if (!active) return { ok: true, recording: false };
@@ -935,6 +948,7 @@ async function startCapture(
     // the recording.
     withMic: true,
     tier: settings.modelTier,
+    openaiApiKey: settings.openaiApiKey,
     micDeviceId: settings.micDeviceId,
     liveTranscription: settings.liveTranscription,
   });
