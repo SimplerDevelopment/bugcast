@@ -52,6 +52,18 @@ describe('nativeSpeechStatus', () => {
     expect(await nativeSpeechStatus('en-US', {} as any)).toBe('unavailable');
   });
 
+  // available() has been seen to sit in "downloading" and never settle. This is
+  // asked after MediaRecorder.start(), so a hang there wedges the recording
+  // rather than merely costing the live pass.
+  it('gives up rather than hanging the recording', async () => {
+    const scope = {
+      SpeechRecognition: class {
+        static available = () => new Promise(() => {}); // never settles
+      },
+    } as any;
+    expect(await nativeSpeechStatus('en-US', scope, 10)).toBe('unavailable');
+  });
+
   it('passes a downloadable pack through rather than treating it as ready', async () => {
     const { scope } = fakeScope({ available: 'downloadable' });
     expect(await nativeSpeechStatus('en-US', scope)).toBe('downloadable');

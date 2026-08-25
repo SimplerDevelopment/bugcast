@@ -54,14 +54,35 @@ export function speechCtor(scope: any = globalThis): Ctor | null {
  * `processLocally` is the whole point — the cloud path would send audio to
  * Google, which is not a thing this tool does quietly.
  */
+/**
+ * Bounded, because this is asked on the way into a recording.
+ *
+ * `available()` is not reliably prompt: it has been seen to sit in
+ * `"downloading"` and never settle when the component never installs
+ * (brave/brave-browser#55414). This call happens after `MediaRecorder.start()`
+ * and before `start()` returns, so a promise that never resolves does not
+ * degrade the live pass — it wedges the whole recording at the moment the user
+ * pressed Record. A `catch` does nothing about a hang; only a clock does.
+ *
+ * Timing out means Whisper takes the live pass, which is the same answer as
+ * "not available" and the right one.
+ */
+const STATUS_TIMEOUT_MS = 1_500;
+
 export async function nativeSpeechStatus(
   lang = 'en-US',
   scope: any = globalThis,
+  timeoutMs = STATUS_TIMEOUT_MS,
 ): Promise<SpeechAvailability> {
   const SR = speechCtor(scope);
   if (!SR || typeof SR.available !== 'function') return 'unavailable';
   try {
-    return (await SR.available({ processLocally: true, langs: [lang] })) as SpeechAvailability;
+    return (await Promise.race([
+      SR.available({ processLocally: true, langs: [lang] }),
+      new Promise<SpeechAvailability>((resolve) =>
+        setTimeout(() => resolve('unavailable'), timeoutMs),
+      ),
+    ])) as SpeechAvailability;
   } catch {
     return 'unavailable';
   }
