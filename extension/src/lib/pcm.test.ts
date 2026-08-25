@@ -40,6 +40,26 @@ describe('live PCM windowing', () => {
     expect(pcm[0]![0]).toBe(0); // the first sample of the session is still there
   });
 
+  // advance() only moves past chunks a window FULLY covers, so in a real
+  // session the cursor routinely sits mid-chunk. Every other test here lands on
+  // a boundary, which is the one case that needs no arithmetic.
+  it('reads correctly when the cursor sits mid-chunk', () => {
+    const pcm = chunks([100, 100, 100]);
+    const cursor = newCursor();
+    advance(pcm, 150, cursor); // 150 splits chunk 1, so the cursor cannot pass it
+    expect(cursor).toEqual({ index: 1, samples: 100 });
+    expect(Array.from(flatten(pcm, 150, 250, cursor))).toEqual(
+      Array.from({ length: 100 }, (_, i) => 150 + i),
+    );
+  });
+
+  it('refuses a window that starts behind the cursor', () => {
+    const pcm = chunks([100, 100, 100]);
+    const cursor = newCursor();
+    advance(pcm, 200, cursor);
+    expect(() => flatten(pcm, 100, 200, cursor)).toThrow(RangeError);
+  });
+
   it('counts everything held, whatever the cursor has passed', () => {
     const pcm = chunks([100, 100, 100]);
     const cursor = newCursor();

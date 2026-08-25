@@ -45,6 +45,14 @@ export function flatten(
   to: number,
   cursor: Cursor,
 ): Float32Array {
+  // Loud, because silent misalignment is the failure this module exists to
+  // stop: `seen` would start past `from`, the leading samples would be absent,
+  // everything after them would sit at the wrong index, and the only visible
+  // symptom would be a transcript with wrong timestamps.
+  if (from < cursor.samples) {
+    throw new RangeError(`flatten: from ${from} is behind the cursor at ${cursor.samples}`);
+  }
+
   const out = new Float32Array(to - from);
   let seen = cursor.samples;
   let written = 0;

@@ -324,7 +324,35 @@ async function stop(): Promise<Response> {
   if (videoOnDisk && hasFolder) {
     const plan = planFrames(events);
     for (const frame of plan) for (const i of frame.events) events[i]!.frame = frame.path;
-    frames = ((await extractFrames(id, plan)) as typeof frames) ?? frames;
+
+    // Extraction reports its reason and the caller used to discard it: the
+    // result was cast to {written, missed}, so an `{error}` object survived the
+    // `??`, `written` came back undefined, and the manifest declared
+    // `frames: {enabled: false}`. That reads as "no frames were wanted" when
+    // what happened is "frame extraction failed", which are different facts and
+    // only one of them is true.
+    const got = (await extractFrames(id, plan)) as {
+      written?: number;
+      missed?: number;
+      error?: string;
+    } | null;
+    frames = { written: got?.written ?? 0, missed: got?.missed ?? plan.length };
+    if (got?.error || !frames.written) {
+      console.warn('[bugcast] no frames extracted', { planned: plan.length, ...got });
+    }
+
+    // The paths above were assigned from the plan, before extraction had a
+    // chance to fail. Leaving them behind points timeline.json at JPEGs that
+    // are not on disk — the same broken promise as a session.json naming a
+    // transcript.srt that was never written.
+    // The plan is consumed in order, so entries from `written` on are the ones
+    // no frame was drawn for — including the ordinary `{written: 8, missed: 3}`
+    // case where the video ended before the last planned moments. Clearing only
+    // on a total failure left those three pointing at JPEGs that do not exist,
+    // which is the very thing this is here to prevent.
+    for (const frame of plan.slice(frames.written)) {
+      for (const i of frame.events) delete events[i]!.frame;
+    }
   }
 
   const redaction = redactor.summary();
@@ -538,11 +566,32 @@ function sessionFiles(
   ];
 }
 
+/**
+ * Wrapped, because this is the last thing a session does and it was losing the
+ * last file it wrote.
+ *
+ * `stop()` clears the recording keepalive on its first line, and `whileAlive`
+ * covers only the offscreen round-trips — so by the time the writes begin,
+ * nothing has reset the worker's idle timer since transcription finished. The
+ * writes are not fast: a long session is a 500KB+ timeline.json plus five
+ * `createWritable()`/`close()` pairs, each committing its own swap file. The
+ * worker was being suspended partway through the loop, which loses whatever
+ * had not been written yet and throws nothing — so no error surfaced, the zip
+ * fallback never fired, and the folder simply came out missing its last file.
+ *
+ * `transcript.srt` is last in the array, so `transcript.srt` is what vanished.
+ * Two sessions in a row declared it in session.json and did not have it on disk.
+ */
 async function writeSession(id: string, files: Array<[string, string]>): Promise<string> {
-  const dir = await storedSessionDirectory();
-  if (!dir) throw new Error('No sessions folder has been chosen.');
-  for (const [name, contents] of files) await writeFile(dir, id, name, contents);
-  return `${dir.name}/${id}`;
+  // Everything inside, including the handle read: IndexedDB is not an extension
+  // API and does not reset the idle timer, so an await out here is unprotected
+  // time in the exact window this is guarding.
+  return whileAlive(async () => {
+    const dir = await storedSessionDirectory();
+    if (!dir) throw new Error('No sessions folder has been chosen.');
+    for (const [name, contents] of files) await writeFile(dir, id, name, contents);
+    return `${dir.name}/${id}`;
+  });
 }
 
 /**
@@ -556,12 +605,14 @@ async function zipSession(id: string, files: Array<[string, string]>): Promise<s
   // recording — but it is needed when video was off or capture never started,
   // in which case no document exists yet.
   await ensureOffscreen();
-  const res = await chrome.runtime.sendMessage({
-    target: 'offscreen',
-    type: OFFSCREEN_ZIP,
-    sessionId: id,
-    files,
-  });
+  const res = await whileAlive(() =>
+    chrome.runtime.sendMessage({
+      target: 'offscreen',
+      type: OFFSCREEN_ZIP,
+      sessionId: id,
+      files,
+    }),
+  );
   if (!res?.ok) throw new Error(res?.error ?? 'Could not write the session anywhere');
   return `Downloads/bugcast/${id}.zip`;
 }
@@ -812,6 +863,12 @@ function keepAwake(): number {
  * one with no side effects.
  */
 async function whileAlive<T>(work: () => Promise<T>): Promise<T> {
+  // Once immediately, then on the interval. `setInterval` does not fire on
+  // entry, so the first ping used to land 20s in — and a caller that had
+  // already burned idle time before getting here (stop() renders the report and
+  // stringifies a 500KB timeline first) could be past the ~30s limit before the
+  // keepalive ever ran. The wrapper would then be decoration.
+  void chrome.runtime.getPlatformInfo();
   const ping = setInterval(() => void chrome.runtime.getPlatformInfo(), 20_000);
   try {
     return await work();
