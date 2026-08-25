@@ -65,7 +65,57 @@ async function readJson(root, id, file) {
 }
 
 export const readManifest = (root, id) => readJson(root, id, 'session.json');
+
+/**
+ * The script index, or an empty list.
+ *
+ * Absent is a normal answer, not an error: a page with no scripts worth
+ * indexing, or a session recorded before the Debugger domain was enabled.
+ */
+export async function readScripts(root, id) {
+  const parsed = await readJson(root, id, 'scripts.json').catch(() => null);
+  return parsed?.scripts ?? [];
+}
 export const readTimeline = (root, id) => readJson(root, id, 'timeline.json');
+
+/**
+ * A session's events, narration included.
+ *
+ * timeline.json deliberately excludes speech — the extension merges narration
+ * in only long enough to render report.md, then filters it back out
+ * (service-worker.ts). That left narration reachable only by reading
+ * speech.ndjson directly, so "what did the tester say around this failure" was
+ * two calls and a manual merge on `t`.
+ *
+ * Merging here restores it, page-stamped from the timeline's own navigations.
+ * Speech is appended before the sort rather than interleaved by hand, matching
+ * how report.md is built: narration usually lands *before* the click it
+ * describes because people narrate intent before acting, and that ordering is
+ * itself information.
+ *
+ * Provisional lines keep their flag. They are what was known live and can be
+ * revised, and a caller deciding how much to trust a quote needs to see that.
+ */
+export async function readSessionEvents(root, id) {
+  const timeline = await readTimeline(root, id);
+  const events = timeline.events ?? [];
+
+  const text = await readFile(path.join(root, id, STREAMS.speech), 'utf8').catch(() => '');
+  if (!text.trim()) return events;
+
+  const speech = [];
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      speech.push(JSON.parse(line));
+    } catch {
+      // A line mid-write, or a truncated final record. Narration is best-effort.
+    }
+  }
+  if (!speech.length) return events;
+
+  return [...events, ...stampPageUrls(speech, navigationIndex(events))].sort((a, b) => a.t - b.t);
+}
 
 export async function readReport(root, id) {
   return readFile(path.join(root, id, 'report.md'), 'utf8');
@@ -126,6 +176,83 @@ export async function isLive(root, id) {
   return (await has('events.ndjson')) && !(await has('timeline.json'));
 }
 
+/**
+ * The page a thing happened on, derived rather than recorded.
+ *
+ * Narration does not know where it was said. The offscreen document owns
+ * speech.ndjson so the two pipelines "share nothing but the clock"
+ * (extension/src/offscreen/main.ts), which means the transcriber has no page
+ * context and every speech record ships `pageUrl: ''`.
+ *
+ * Navigation events do carry it, and they are a step function over `t` — so the
+ * page at an utterance is a lookup, not a guess. Deriving here beats stamping at
+ * capture in both directions: it adds no message traffic between two pipelines
+ * kept deliberately apart, and it resolves to where the tester actually was.
+ * The extension's authoritative pass uses the session's START url
+ * (service-worker.ts), which misattributes every word spoken after the first
+ * navigation — blank narration is easier to catch than narration filed under
+ * the wrong page.
+ */
+export function navigationIndex(events) {
+  return events
+    .filter((e) => e.type === 'navigation' && e.pageUrl)
+    .map((e) => ({ t: e.t, pageUrl: e.pageUrl }))
+    .sort((a, b) => a.t - b.t);
+}
+
+/**
+ * The last navigation at or before `t`, or '' if the index is empty or `t`
+ * predates the first one. Binary search because a follow-loop resolves one of
+ * these per speech line and sessions run long.
+ */
+export function pageUrlAt(index, t) {
+  let lo = 0;
+  let hi = index.length - 1;
+  let found = '';
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (index[mid].t <= t) {
+      found = index[mid].pageUrl;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return found;
+}
+
+/**
+ * Fill in a missing `pageUrl` without ever overwriting a real one — an event
+ * that recorded its own page is the better source, and a future capture fix
+ * must not be silently overridden by this one.
+ */
+export function stampPageUrls(events, index) {
+  if (!index.length) return events;
+  return events.map((e) => (e.pageUrl ? e : { ...e, pageUrl: pageUrlAt(index, e.t) }));
+}
+
+/**
+ * Navigations only, read straight off the event stream.
+ *
+ * The substring prefilter is not premature: a follow-loop calls this per poll,
+ * and JSON.parse over a whole session to find the handful of navigations in it
+ * is the kind of cost this server exists to avoid.
+ */
+async function readNavigationIndex(root, id) {
+  const text = await readFile(path.join(root, id, STREAMS.events), 'utf8').catch(() => '');
+  const index = [];
+  for (const line of text.split('\n')) {
+    if (!line.includes('"type":"navigation"')) continue;
+    try {
+      const e = JSON.parse(line);
+      if (e.pageUrl) index.push({ t: e.t, pageUrl: e.pageUrl });
+    } catch {
+      // A line mid-write. The next poll picks it up whole.
+    }
+  }
+  return index.sort((a, b) => a.t - b.t);
+}
+
 /** Events and narration are separate outputs; both carry `t` from one origin. */
 export const STREAMS = { events: 'events.ndjson', speech: 'speech.ndjson' };
 
@@ -159,9 +286,14 @@ export async function tailEvents(root, id, cursor = 0, limit = 200, stream = 'ev
       break;
     }
   }
+  // Narration carries no page of its own; derive it from the navigations
+  // around it so a speech line says where it was spoken.
+  const resolved =
+    file === STREAMS.speech ? stampPageUrls(events, await readNavigationIndex(root, id)) : events;
+
   return {
     stream,
-    events,
+    events: resolved,
     cursor: cursor + events.length,
     total: lines.length,
     more: cursor + events.length < lines.length,

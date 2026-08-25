@@ -6,8 +6,9 @@ import { DefaultRedactor } from '../lib/redact';
 import { SCHEMA_VERSION } from '../lib/events';
 import { sessionId, storedSessionDirectory, writeFile } from '../lib/session-store';
 import { renderReport } from '../lib/report';
-import { toSpeechEvents, toSrt, type Segment } from '../lib/srt';
+import { pageUrlResolver, toSpeechEvents, toSrt, type Segment } from '../lib/srt';
 import { planFrames } from '../lib/frames';
+import { dedupe, fromScriptParsed, type ScriptEntry } from '../lib/scripts';
 import { runChecks, type Check } from '../lib/self-test';
 import { loadSettings } from '../lib/settings';
 import type { RedactionSummary } from '../lib/redact';
@@ -61,6 +62,13 @@ interface Recording {
    * fact about the session.
    */
   app: Record<string, unknown> | null;
+  /**
+   * Every script the page loaded, with its sourceMapURL.
+   *
+   * Not events: a script is not a thing that happened at a moment, and putting
+   * these in the timeline would bury what an agent is actually reading.
+   */
+  scripts: ScriptEntry[];
   /**
    * Where the session began. Held separately because `ctx.pageUrl` is *current*
    * page context and navigation mutates it — reading it at stop time reported
@@ -147,6 +155,9 @@ async function start(
    * session, which the disk smoke caught by comparing counts.
    */
   const beforeActive: string[] = [];
+  // scriptParsed replays the instant the domain is enabled, which is before
+  // `active` exists — the same hand-over the event stream already needs.
+  const beforeActiveScripts: ScriptEntry[] = [];
   const record = (event: TimelineEvent): void => {
     events.push(event);
     if (active) queueLine(JSON.stringify(event));
@@ -188,6 +199,14 @@ async function start(
 
   new NetworkCapture(cdp, ctx).start();
   new PageCapture(cdp, ctx).start();
+
+  // Replayed for everything already loaded the moment Debugger.enable lands, so
+  // this catches the bundle even though recording starts long after the page did.
+  cdp.on('Debugger.scriptParsed', (p) => {
+    const entry = fromScriptParsed(p, (u) => ctx.redactor.url(u));
+    if (entry && active) active.scripts.push(entry);
+    else if (entry) beforeActiveScripts.push(entry);
+  });
   await injectInteractionCapture(tab.id);
 
   // Recording almost always starts on an already-loaded page, so
@@ -217,6 +236,7 @@ async function start(
     title: title || tab.title || tab.url || 'Session',
     startUrl: ctx.pageUrl,
     app: null,
+    scripts: [...beforeActiveScripts],
     id,
     video: Boolean(capture),
   };
@@ -242,7 +262,7 @@ async function start(
 
 async function stop(): Promise<Response> {
   if (!active) return { ok: true, recording: false };
-  const { cdp, events, startedAt, redactor, title, startUrl, id, video, app } = active;
+  const { cdp, events, startedAt, redactor, title, startUrl, id, video, app, scripts } = active;
   await chrome.storage.local.set({ recording: false });
   clearInterval(active.awake);
   await flushEvents();
@@ -280,7 +300,18 @@ async function stop(): Promise<Response> {
     // live solely in speech.ndjson, which stays an append-only log of what was
     // known at the time. These are merged in purely so report.md can interleave
     // them; timeline.json filters them back out.
-    events.push(...toSpeechEvents(segments, startUrl));
+    // Resolved per segment, not stamped with startUrl: a session that navigates
+    // would otherwise file every word spoken after the first navigation under
+    // the page it opened on.
+    events.push(
+      ...toSpeechEvents(
+        segments,
+        pageUrlResolver(
+          events.filter((e) => e.type === 'navigation') as Array<{ t: number; pageUrl: string }>,
+          startUrl,
+        ),
+      ),
+    );
     events.sort((a, b) => a.t - b.t);
   }
 
@@ -293,7 +324,35 @@ async function stop(): Promise<Response> {
   if (videoOnDisk && hasFolder) {
     const plan = planFrames(events);
     for (const frame of plan) for (const i of frame.events) events[i]!.frame = frame.path;
-    frames = ((await extractFrames(id, plan)) as typeof frames) ?? frames;
+
+    // Extraction reports its reason and the caller used to discard it: the
+    // result was cast to {written, missed}, so an `{error}` object survived the
+    // `??`, `written` came back undefined, and the manifest declared
+    // `frames: {enabled: false}`. That reads as "no frames were wanted" when
+    // what happened is "frame extraction failed", which are different facts and
+    // only one of them is true.
+    const got = (await extractFrames(id, plan)) as {
+      written?: number;
+      missed?: number;
+      error?: string;
+    } | null;
+    frames = { written: got?.written ?? 0, missed: got?.missed ?? plan.length };
+    if (got?.error || !frames.written) {
+      console.warn('[bugcast] no frames extracted', { planned: plan.length, ...got });
+    }
+
+    // The paths above were assigned from the plan, before extraction had a
+    // chance to fail. Leaving them behind points timeline.json at JPEGs that
+    // are not on disk — the same broken promise as a session.json naming a
+    // transcript.srt that was never written.
+    // The plan is consumed in order, so entries from `written` on are the ones
+    // no frame was drawn for — including the ordinary `{written: 8, missed: 3}`
+    // case where the video ended before the last planned moments. Clearing only
+    // on a total failure left those three pointing at JPEGs that do not exist,
+    // which is the very thing this is here to prevent.
+    for (const frame of plan.slice(frames.written)) {
+      for (const i of frame.events) delete events[i]!.frame;
+    }
   }
 
   const redaction = redactor.summary();
@@ -302,7 +361,7 @@ async function stop(): Promise<Response> {
   let report = '';
   try {
     report = renderSessionReport(id, title, startedAt, startUrl, events, redaction);
-    const files = sessionFiles(id, startedAt, startUrl, events, redaction, report, videoOnDisk, segments, frames.written, app);
+    const files = sessionFiles(id, startedAt, startUrl, events, redaction, report, videoOnDisk, segments, frames.written, app, dedupe(scripts));
     if (hasFolder) {
       try {
         written = await writeSession(id, files);
@@ -400,6 +459,8 @@ function sessionFiles(
   frameCount: number,
   /** What the page contributed via `bugcast:session`. Absent when it said nothing. */
   app: Record<string, unknown> | null,
+  /** One entry per script URL, for resolving a minified frame at read time. */
+  scripts: ScriptEntry[],
 ): Array<[string, string]> {
   const durationMs = durationOf(events);
 
@@ -438,6 +499,16 @@ function sessionFiles(
           frames: frameCount
             ? { enabled: true, dir: 'frames/', count: frameCount, longEdge: 1280 }
             : { enabled: false },
+          // Declared false rather than omitted: an agent must be able to tell
+          // "this page shipped no source maps" from "this build did not index them".
+          scripts: scripts.length
+            ? {
+                enabled: true,
+                file: 'scripts.json',
+                count: scripts.length,
+                withSourceMaps: scripts.filter((s) => s.sourceMapURL || s.inlineMap).length,
+              }
+            : { enabled: false },
         },
         redaction: {
           typedValues: 'off',
@@ -454,6 +525,7 @@ function sessionFiles(
           ...(video ? { video: 'video.webm' } : {}),
           ...(segments.length ? { transcript: 'transcript.srt' } : {}),
           ...(frameCount ? { frames: 'frames/' } : {}),
+          ...(scripts.length ? { scripts: 'scripts.json' } : {}),
         },
       },
     null,
@@ -462,6 +534,16 @@ function sessionFiles(
 
   return [
     ['session.json', manifest],
+    // Its own file rather than a session.json block: a real app ships dozens of
+    // chunks, and the manifest is meant to stay readable at a glance.
+    ...(scripts.length
+      ? ([
+          [
+            'scripts.json',
+            JSON.stringify({ schemaVersion: SCHEMA_VERSION, sessionId: id, scripts }, null, 2),
+          ],
+        ] as Array<[string, string]>)
+      : []),
     [
       'timeline.json',
       JSON.stringify(
@@ -484,11 +566,32 @@ function sessionFiles(
   ];
 }
 
+/**
+ * Wrapped, because this is the last thing a session does and it was losing the
+ * last file it wrote.
+ *
+ * `stop()` clears the recording keepalive on its first line, and `whileAlive`
+ * covers only the offscreen round-trips — so by the time the writes begin,
+ * nothing has reset the worker's idle timer since transcription finished. The
+ * writes are not fast: a long session is a 500KB+ timeline.json plus five
+ * `createWritable()`/`close()` pairs, each committing its own swap file. The
+ * worker was being suspended partway through the loop, which loses whatever
+ * had not been written yet and throws nothing — so no error surfaced, the zip
+ * fallback never fired, and the folder simply came out missing its last file.
+ *
+ * `transcript.srt` is last in the array, so `transcript.srt` is what vanished.
+ * Two sessions in a row declared it in session.json and did not have it on disk.
+ */
 async function writeSession(id: string, files: Array<[string, string]>): Promise<string> {
-  const dir = await storedSessionDirectory();
-  if (!dir) throw new Error('No sessions folder has been chosen.');
-  for (const [name, contents] of files) await writeFile(dir, id, name, contents);
-  return `${dir.name}/${id}`;
+  // Everything inside, including the handle read: IndexedDB is not an extension
+  // API and does not reset the idle timer, so an await out here is unprotected
+  // time in the exact window this is guarding.
+  return whileAlive(async () => {
+    const dir = await storedSessionDirectory();
+    if (!dir) throw new Error('No sessions folder has been chosen.');
+    for (const [name, contents] of files) await writeFile(dir, id, name, contents);
+    return `${dir.name}/${id}`;
+  });
 }
 
 /**
@@ -502,12 +605,14 @@ async function zipSession(id: string, files: Array<[string, string]>): Promise<s
   // recording — but it is needed when video was off or capture never started,
   // in which case no document exists yet.
   await ensureOffscreen();
-  const res = await chrome.runtime.sendMessage({
-    target: 'offscreen',
-    type: OFFSCREEN_ZIP,
-    sessionId: id,
-    files,
-  });
+  const res = await whileAlive(() =>
+    chrome.runtime.sendMessage({
+      target: 'offscreen',
+      type: OFFSCREEN_ZIP,
+      sessionId: id,
+      files,
+    }),
+  );
   if (!res?.ok) throw new Error(res?.error ?? 'Could not write the session anywhere');
   return `Downloads/bugcast/${id}.zip`;
 }
@@ -758,6 +863,12 @@ function keepAwake(): number {
  * one with no side effects.
  */
 async function whileAlive<T>(work: () => Promise<T>): Promise<T> {
+  // Once immediately, then on the interval. `setInterval` does not fire on
+  // entry, so the first ping used to land 20s in — and a caller that had
+  // already burned idle time before getting here (stop() renders the report and
+  // stringifies a 500KB timeline first) could be past the ~30s limit before the
+  // keepalive ever ran. The wrapper would then be decoration.
+  void chrome.runtime.getPlatformInfo();
   const ping = setInterval(() => void chrome.runtime.getPlatformInfo(), 20_000);
   try {
     return await work();

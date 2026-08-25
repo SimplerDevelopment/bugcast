@@ -46,20 +46,56 @@ is written to disk.
 
 ## Install
 
-Bugcast is not on the Chrome Web Store yet (submission is in progress — the
-`chrome.debugger` permission gets a manual review). Until then:
+Not on the Chrome Web Store yet — the `chrome.debugger` permission gets a manual
+review and that submission is pending. There are no release builds either, so
+today you build it. It needs [bun](https://bun.sh) and nothing else:
 
-1. Download the latest `bugcast.zip` from
-   [Releases](https://github.com/SimplerDevelopment/bugcast/releases) and unzip it.
-2. Go to `chrome://extensions`, turn on **Developer mode**, and click
-   **Load unpacked**. Select the unzipped folder.
-3. Click the Bugcast icon and press **Record**.
-   *First run only: choose a folder for sessions, and pick a Whisper model tier.*
-4. Do the thing. Press **Stop**. Your session folder is where you pointed it.
+```bash
+git clone https://github.com/SimplerDevelopment/bugcast
+cd bugcast/extension
+bun install
+bun run build          # writes dist/
+```
 
-No terminal, no compiler, no sidecar process. That's deliberate — see
+1. Go to `chrome://extensions`, turn on **Developer mode**, click **Load
+   unpacked**, and select `bugcast/extension/dist`.
+2. Click the Bugcast icon and press **Record**. Chrome asks once for a folder to
+   write sessions into. **Choose `~/bugcast-sessions`.** The MCP server reads
+   that path by default, so picking it here is the entire configuration at both
+   ends — see [below](#use-it-from-your-agents-in-any-project).
+3. Grant the microphone once, in **Options → Microphone**. Narration is
+   transcribed from the mic and nothing else, so without the grant there is no
+   transcript at all — and the recorder runs in an offscreen document with no
+   UI, which means it can never prompt you for it mid-session.
+4. Do the thing. **⌘⇧U** starts and stops, **⌘⇧E** marks the moment you would
+   call the bug — `Ctrl` for those on Windows and Linux. That mark is the
+   strongest signal in the artifact and the one an agent is told to start from,
+   so use it. Press Stop and the folder is written.
+
+   Chrome silently drops a suggested shortcut another extension already claimed,
+   so if a key does nothing, **Options → Shortcuts** shows what actually bound.
+
+No sidecar process and no per-platform binary — that part is deliberate, see
 [the design notes](docs/design/issues/03-local-transcription-real-costs.md) for
 why the obvious `whisper.cpp` approach doesn't work.
+
+### The first recording downloads a model
+
+Transcription is local, so the first session has to fetch the Whisper weights
+(`base.en` by default) before it can produce a single word. Until that lands:
+
+- `speech.ndjson` stays empty, and
+- **Stop blocks.** The authoritative transcript pass waits on the same download,
+  so the folder holds only `events.ndjson` and `video.webm` — no `report.md`,
+  no `session.json` — until it finishes.
+
+Nothing is broken; it is a one-time download in the critical path. The popup
+shows *"Downloading the speech model — N%"*, but the popup closes the moment you
+click the page you are testing, so the reliable place to watch it is
+`chrome://extensions` → Bugcast → **Inspect views: `offscreen.html`**.
+
+Cached after that, per tier. Changing tier in Options downloads the new one on
+your next recording. Do a throwaway ten-second session first and let it warm.
 
 ## Settings
 
@@ -110,21 +146,46 @@ response bodies — an `apiKey` in an annotation is treated exactly like an
 `apiKey` in a 500. Attaching your whole Redux store is not a good idea, but it
 will not blow up the artifact if you do.
 
-## Hand a session to a coding agent
+## Use it from your agents, in any project
 
-Point it at `report.md` and you're done — that's the whole handoff, and it needs
-nothing installed.
+Point an agent at `report.md` and you're done — that's the whole handoff, it
+needs nothing installed, and it works with any tool that can read a file.
 
 For longer sessions — where the raw timeline runs to tens of thousands of tokens
-— there's an optional read-only MCP server, registered once for every project
-you ever open:
+— there's an optional read-only MCP server. Register it **once** and it is there
+in every project you ever open. **It isn't on npm yet**, so point it at the
+clone you already made:
 
 ```bash
-claude mcp add --scope user bugcast -- npx -y bugcast
+cd bugcast/mcp && npm install          # one dependency, no build step
+claude mcp add --scope user bugcast -- node "$PWD/src/index.mjs"
 ```
 
-Point the extension at `~/bugcast-sessions` and no path configuration is needed
-at either end.
+`--scope user` is the whole trick: one registration, every repo, nothing to add
+per-project and no config file to copy around. Once it's published this
+collapses to `npx -y bugcast`.
+
+If you pointed the extension at `~/bugcast-sessions` there is no path to
+configure at either end — that is the directory the server reads by default.
+Somewhere else is fine: append `--dir /path/to/sessions`, or set `BUGCAST_DIR`.
+
+| Tool | |
+|---|---|
+| `sessions_list` | Recent sessions, newest first. One still recording is marked `live`. |
+| `session_tail` | Events since a cursor. **Works during recording.** `stream: "speech"` follows narration instead. |
+| `session_report` | The rendering of a finished session. Start a post-mortem here. |
+| `session_query` | A filtered slice of a finished timeline. `failedOnly: true` answers "what went wrong". |
+| `session_frame` | The JPEG nearest a moment, for seeing what the page actually showed. |
+| `session_resolve` | A minified stack turned into real files and lines, using the source maps already in your checkout. |
+
+Then, in whatever project the bug lives in, just ask:
+
+> Read the latest bugcast session and tell me what broke.
+
+It calls `sessions_list`, then `session_report`, and takes it from there. A
+session is only visible to `sessions_list` once it has been stopped and written
+— a recording still in flight has no `session.json` yet, which is what `live`
+means and why the tail below exists.
 
 It can also read a session **while you are still recording it**, so an agent
 follows along live rather than waiting for you to finish:
@@ -148,6 +209,11 @@ loop running in the **main conversation**, where Claude Code turns a call still
 running at two minutes into a background task and carries on. A subagent or a
 headless run gets no such rescue and will simply block for the full wait, so
 keep those at 30s.
+
+So the live version of the ask is just:
+
+> I'm recording a bugcast session right now. Follow it with `session_tail` and
+> tell me the moment something fails.
 
 Events and narration are **separate outputs**. Both carry `t` in milliseconds
 from the same origin, so merging on it is exact — and worth doing, because

@@ -19,6 +19,7 @@ import path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { startChannel } from './channel.mjs';
+import { resolveStack } from './sourcemaps.mjs';
 import { z } from 'zod';
 import os from 'node:os';
 import {
@@ -31,7 +32,8 @@ import {
   listSessionIds,
   readFrame,
   readReport,
-  readTimeline,
+  readScripts,
+  readSessionEvents,
   resolveSessionId,
   summarise,
 } from './sessions.mjs';
@@ -120,7 +122,7 @@ server.registerTool(
   {
     title: 'Query a session timeline',
     description:
-      'A filtered slice of the timeline. Prefer this over reading timeline.json whole — a fifteen-minute session is roughly 50k tokens. Use failedOnly:true for "what went wrong".',
+      'A filtered slice of the timeline, narration included. Prefer this over reading timeline.json whole — a fifteen-minute session is roughly 50k tokens. Use failedOnly:true for "what went wrong", or type:"speech" for what the tester said.',
     inputSchema: {
       sessionId: z.string(),
       type: z
@@ -138,8 +140,7 @@ server.registerTool(
     },
   },
   async ({ sessionId, ...query }) => {
-    const timeline = await readTimeline(ROOT, await resolve(sessionId));
-    return text(filterEvents(timeline.events ?? [], query));
+    return text(filterEvents(await readSessionEvents(ROOT, await resolve(sessionId)), query));
   },
 );
 
@@ -202,6 +203,32 @@ server.registerTool(
         { type: 'image', data: frame.base64, mimeType: 'image/jpeg' },
       ],
     };
+  },
+);
+
+server.registerTool(
+  'session_resolve',
+  {
+    title: 'Resolve a minified stack against your checkout',
+    description:
+      'Turn `bundle.js:1:38402` into a real file and line. Paste the `stack` from an exception or console event; ' +
+      'frames are resolved through the session\'s script index and the source maps already in this project. ' +
+      'Entirely local — nothing is fetched. Frames it cannot resolve say why rather than guessing, because a ' +
+      'confidently wrong file is worse than an unresolved one.',
+    inputSchema: {
+      sessionId: z.string(),
+      stack: z.string().describe('The raw multi-line stack, as it appears on the event.'),
+    },
+  },
+  async ({ sessionId, stack }) => {
+    const id = await resolve(sessionId);
+    const scripts = await readScripts(ROOT, id);
+    if (!scripts.length) {
+      return text({
+        error: `Session "${id}" has no script index. It was recorded before source-map indexing, or the Debugger domain could not attach.`,
+      });
+    }
+    return text(await resolveStack(stack, scripts));
   },
 );
 

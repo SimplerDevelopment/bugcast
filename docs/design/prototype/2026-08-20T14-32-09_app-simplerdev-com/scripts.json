@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "sessionId": "2026-08-20T14-32-09_app-simplerdev-com",
+  "scripts": [
+    {
+      "scriptId": "12",
+      "url": "https://app.simplerdev.com/assets/portal-4f2a9c.js",
+      "sourceMapURL": "portal-4f2a9c.js.map",
+      "hash": "9d1f3a4b8c2e5f7a0b6d4e8c1a3f5b7d9e2c4a6f8b0d2e4c6a8f0b2d4e6c8a0f"
+    },
+    {
+      "scriptId": "13",
+      "url": "https://app.simplerdev.com/assets/vendor-8b1e2d.js",
+      "sourceMapURL": "vendor-8b1e2d.js.map",
+      "hash": "3c5e7a9b1d3f5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a3c5e7b9d1f3a5c"
+    },
+    {
+      "scriptId": "14",
+      "url": "https://app.simplerdev.com/portal/websites/12/posts/487/edit",
+      "hash": "7f9a1c3e5b7d9f1a3c5e7b9d1f3a5c7e9b1d3f5a7c9e1b3d5f7a9c1e3b5d7f9a"
+    },
+    {
+      "scriptId": "15",
+      "url": "https://cdn.plausible.io/js/script.js",
+      "hash": "1a3c5e7b9d1f3a5c7e9b1d3f5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a3c"
+    }
+  ]
+}

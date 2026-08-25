@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { chunksToSegments, DEFAULT_TIER, MIN_SAMPLES, MODELS } from './transcribe';
+import { assertDtypeKeys, chunksToSegments, DTYPE, DEFAULT_TIER, MIN_SAMPLES, MODELS } from './transcribe';
 
 describe('chunksToSegments', () => {
   it('converts seconds to milliseconds and offsets from t0', () => {
@@ -31,5 +31,25 @@ describe('model configuration', () => {
 
   it('skips transcription below a second of audio rather than downloading a model for silence', () => {
     expect(MIN_SAMPLES).toBe(16_000);
+  });
+});
+
+describe('assertDtypeKeys', () => {
+  it('accepts the shipped config', () => {
+    expect(() => assertDtypeKeys(DTYPE)).not.toThrow();
+  });
+
+  // The whole point: transformers.js resolves per-module dtype by
+  // hasOwnProperty and, on a miss, silently uses the device default — q8 on
+  // wasm — which is the one config that fails Whisper session creation. A typo
+  // must therefore fail loudly here rather than quietly there.
+  it('refuses a typo that would silently become q8', () => {
+    expect(() => assertDtypeKeys({ encoder_model: 'fp32', decoder_merged: 'q4' })).toThrow(/q8/);
+    expect(() => assertDtypeKeys({ encoder: 'fp32', decoder_model_merged: 'q4' })).toThrow(/Unknown dtype key/);
+  });
+
+  it('refuses a missing module rather than letting it default', () => {
+    expect(() => assertDtypeKeys({ encoder_model: 'fp32' })).toThrow(/decoder_model_merged/);
+    expect(() => assertDtypeKeys({})).toThrow(/Missing dtype key/);
   });
 });

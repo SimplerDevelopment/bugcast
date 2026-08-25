@@ -5,9 +5,18 @@ coding agent — including **while they are still being recorded**.
 
 ## Setup, once, for every project
 
+**Not on npm yet**, so this runs from a clone rather than `npx`:
+
 ```bash
-claude mcp add --scope user bugcast -- npx -y bugcast
+git clone https://github.com/SimplerDevelopment/bugcast
+cd bugcast/mcp && npm install          # one dependency, no build step
+claude mcp add --scope user bugcast -- node "$PWD/src/index.mjs"
 ```
+
+`npm install` is not optional — a clone has no `node_modules`, and without it
+the server exits on a missing `@modelcontextprotocol/sdk` before Claude ever
+speaks to it. There is no build step: the source runs as-is. Once it's published
+the whole thing collapses back to `npx -y bugcast` and nothing else changes.
 
 `--scope user` is the point: registered once, available in every project you
 open, with nothing to add per-repo.
@@ -16,8 +25,8 @@ No `--dir` needed if you point the extension at **`~/bugcast-sessions`**, which
 is what this server reads by default. The path cannot be discovered
 automatically — the File System Access API never exposes an absolute path, so
 the extension does not know it either — so the two ends agree by convention
-instead. Somewhere else is fine: `npx -y bugcast --dir /path/to/sessions`, or set
-`BUGCAST_DIR`.
+instead. Somewhere else is fine — append `--dir /path/to/sessions` to the
+command above, or set `BUGCAST_DIR`.
 
 The directory is created if it does not exist. An empty one is a correct answer
 to "what sessions exist", not a reason to fail on the first run.
@@ -31,6 +40,7 @@ to "what sessions exist", not a reason to fail on the first run.
 | `session_report` | The human-readable rendering of a finished session. Start here for a post-mortem. |
 | `session_query` | A filtered slice of a finished timeline. `failedOnly: true` answers "what went wrong". |
 | `session_frame` | The JPEG nearest a moment, for seeing what the page showed. |
+| `session_resolve` | Turn a minified stack into real files and lines, using the source maps already in your checkout. |
 
 ## Following a live session
 
@@ -101,7 +111,7 @@ interrupt you for:
 
 | Pushed | Not pushed |
 |---|---|
-| Moments the tester marked (⌘⇧M) | Clicks, navigations, focus, typing |
+| Moments the tester marked (⌘⇧E) | Clicks, navigations, focus, typing |
 | Uncaught exceptions | Successful requests |
 | Console errors | Ordinary console output |
 | Failed requests, with response bodies | Provisional speech (it changes under you) |
@@ -112,6 +122,31 @@ within the same poll are batched into a single notification for the same reason.
 
 Use `session_tail` when the agent wants the *whole* stream; use the channel to be
 told that something happened.
+
+## Resolving a minified stack
+
+A captured frame is `bundle.js:1:38402`. You are sitting in the repo that
+produced that bundle, so the answer is already on your disk:
+
+```
+session_resolve({ sessionId: "latest", stack: "<the stack from the event>" })
+  -> [{ resolved: true, source: "src/editor/save.ts", sourceLine: 142, ... }]
+```
+
+The extension records every script the page loaded with its `sourceMappingURL`,
+but deliberately **does not fetch the maps** — that would be a network call
+inside a tool whose whole premise is that recording makes none. Resolution
+happens here instead, against `process.cwd()`: the project this server was
+launched in. Maps are matched by basename, which content-hashed filenames make
+far less ambiguous than it sounds, and nothing is downloaded.
+
+**It tells you when it does not know.** A frame it cannot place says why — no
+map shipped, the map was inline in the bundle, no such `.map` in this checkout,
+no entry at that position. A guessed frame is worse than an unresolved one,
+because an agent will act on it and edit the wrong file with confidence. If two
+builds are lying around, both are reported rather than one being silently
+preferred, since resolving against a stale `build/` is exactly how you get a
+plausible wrong answer.
 
 ## Read-only, always
 

@@ -117,8 +117,24 @@ Every one of these was found the expensive way. Do not rediscover them.
   `downloads.download`. And the worker must wait for the download to *finish*
   before closing the document, because closing it revokes the URL the download
   is reading from.
-- **`chrome.tabCapture.getMediaStreamId` needs an `activeTab` grant** that only a
-  real toolbar-icon click produces. Host permissions do not substitute.
+- **`chrome.tabCapture.getMediaStreamId` needs an `activeTab` grant.** Host
+  permissions do not substitute — but a *toolbar click* is no longer the only
+  source: CDP `Extensions.triggerAction` enters Chromium's real
+  `ExecuteUserAction` path, which grants tab permissions unconditionally
+  (`kGrantTabPermissions = true`). Measured, control-first, in
+  `scripts/tabcapture-probe.mjs`.
+- **`Extensions.triggerAction` names a target but acts on the *focused* tab.**
+  Chromium's `ExecuteUserAction` runs against the window's active web contents,
+  so passing the correct `targetId` is not enough — that tab has to be in front.
+  The failure is vicious: `triggerAction` returns ok, and `tabCapture` then
+  refuses with an error naming `activeTab`, which points at the grant rather
+  than at focus. `bringToFront()` before granting. And it must be a **tab**
+  target, a distinct type that does not appear in `/json/list` at all — it comes
+  from `Target.getTargets({filter:[{type:'tab'}]})`, or you get "Action can only
+  be triggered on a tab target."
+- **A freshly *installed* worker can ignore one `Runtime.runIfWaitingForDebugger`.**
+  The pause can land after the release, so loop until an evaluate actually
+  answers rather than assuming one call woke it.
 - **The MCP SDK version silently controls whether the channel exists.** On
   Claude Code's v2 runtime (default from v2.1.232), a channel server negotiating
   MCP protocol revision `2026-07-28` is not registered as a channel at all — no
@@ -161,18 +177,29 @@ including a live credential leak (`?pw=` sailing through the URL redactor,
 because the same blind spot wrote both the pattern and its tests). Unit tests
 verify what you believed; this verifies what Chrome does.
 
-Two things it cannot check, because both are native OS dialogs no automation can
-drive — they need a human, and this is already recorded in
-`docs/design/issues/10`:
+Two things it cannot check, and this is recorded in `docs/design/issues/10`:
 
 - the File System Access directory grant, and whether it really re-prompts only
-  once per browser restart;
+  once per browser restart — a native OS dialog no automation can drive;
 - whether `tabCapture`'s paint-driven cadence leaves the webm's timeline
-  tracking wall-clock;
-- `tabCapture` itself, which needs an activeTab grant no automation can produce.
-  The harness works around this by driving `buildPipeline` — the real function —
-  with a canvas+oscillator stream, which does verify the worklet, the tee,
-  MediaRecorder and the 48k→16k decimation.
+  tracking wall-clock.
+
+**`tabCapture` itself used to be the third, and is half-solved.** The smoke now
+grants `activeTab` through `Extensions.triggerAction`, so `getMediaStreamId`
+succeeds for real — `captureError: null`, asserted. The production path from the
+grant through the offscreen document to `video.webm` on disk is exercised where
+before it was not reached at all.
+
+**But how many bytes come out is not deterministic, and is not asserted.**
+tabCapture is paint-driven: a tab that is not painting delivers no frames. Two
+consecutive runs of the same code produced 14187 bytes and 0 bytes. So the
+grant is tested; the video content is not, and asserting byte count would buy a
+flaky suite for nothing. This is the same open question `map.md` already carries
+under "tabCapture frame cadence on a static page".
+
+The canvas+oscillator block stays, with a narrower job: it is no longer standing
+in for `tabCapture`, it is the focused check on the worklet, the tee and the
+48k→16k decimation ratio, which the real path exercises but does not assert.
 
 ## Where things are
 
@@ -197,25 +224,28 @@ Shipped: #1 clock · #2 CDP capture · #3 redaction · #7 disk output ·
 #8 frame index · #10 recording UX · #11 self-test · #12 MCP server ·
 #14 (closed as a false alarm) · #15 zip fallback · #13 CI and release.
 
-**#1-#16 are closed. #17-#24 are open**, all derived from
-[ticket 17](docs/design/issues/17-what-a-project-contributes.md) and the
-research pass behind it:
+**#1-#24 are closed.** #17-#24 came out of
+[ticket 17](docs/design/issues/17-what-a-project-contributes.md) and the two
+research passes behind it: the User Timing app-meta extension point, source maps
+indexed at capture and resolved at read, the `session_tail` follow-loop replacing
+the channel as the live story, and three measurements.
 
-- **#17** the app-meta extension point — *built and smoke-verified, awaiting its
-  commit*. Note it does **not** bump `schemaVersion`: additive changes do not,
-  and a bump would make the MCP server refuse every session recorded earlier.
-- **#18** `session_tail`'s opt-in `waitMs` ceiling · **#19** demote the channel
-  to a flagged extra and record the MCP SDK protocol hazard · **#20** the
-  duplicate `lastSession` write.
-- **#21** measure `tailEvents` before touching the cursor · **#22** a clean-room
-  harness for `Debugger.enable`, which **blocks #23**, source maps.
-- **#24** a second research pass — four areas where nothing survived
-  verification, including whether ticket 11 was right to ship no skill.
+**Two of those measurements said "don't", and that is the point of them.** The
+byte-offset cursor was rejected on evidence rather than principle — a realistic
+follow-loop costs 42ms in total (`mcp/scripts/tail-probe.mjs`). `Debugger.enable`
+turned out to cost nothing measurable, which is what let source-map indexing be
+always-on rather than an opt-in
+(`extension/scripts/debugger-cost-cleanroom.mjs`). And `DEVICE = 'wasm'` stays
+put, not because WASM is faster — no primary benchmark exists in either
+direction — but because the pinned WebGPU stack leaks ~650 MB per 30-second
+chunk.
 
-Read ticket 17 before picking any of these up: it corrects 16, reopens 11's
-no-skill decision, and names two measurement gates that must not be skipped.
-**#22 and #23 are ordered, not parallel** — the domain cost decides whether the
-Debugger domain can be always-on at all.
+Read `docs/design/map.md`'s **"What is measured, and what is folklore"** before
+proposing any performance change. It exists to enforce one rule: a perf change
+lands with its probe, or it does not land.
 
-Not on the tracker: the three things needing a human (above), and a Web Store
-submission.
+Still not on the tracker: the three things needing a human (above), a Web Store
+submission, and four areas a research pass tried and failed to close — MV3
+worker lifetime, File System Access throughput, Claude Skills authoring (which
+leaves ticket 11's no-skill decision un-evidenced), and what comparable tools
+capture that we do not.

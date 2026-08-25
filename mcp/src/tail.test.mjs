@@ -3,7 +3,15 @@ import { test } from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { isLive, MAX_WAIT_MS, SAFE_WAIT_MS, tailEvents, tailEventsWaiting, waitForChange } from './sessions.mjs';
+import {
+  isLive,
+  MAX_WAIT_MS,
+  readSessionEvents,
+  SAFE_WAIT_MS,
+  tailEvents,
+  tailEventsWaiting,
+  waitForChange,
+} from './sessions.mjs';
 
 function fixture(ndjson, { timeline = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bugcast-tail-'));
@@ -170,4 +178,69 @@ test('the two streams merge on t, and narration precedes the action', async () =
     ...(await tailEvents(root, id, 0, 200, 'speech')).events,
   ].sort((a, b) => a.t - b.t);
   assert.deepEqual(merged.map((e) => e.type), ['speech', 'click']);
+});
+
+// timeline.json has speech filtered out by the extension, so session_query
+// could never see narration. readSessionEvents merges speech.ndjson back in and
+// derives the page each line was spoken on.
+function sessionFixture({ events, speech }) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bugcast-merge-'));
+  const id = '2026-08-20T14-32-09_x-test';
+  fs.mkdirSync(path.join(root, id));
+  fs.writeFileSync(
+    path.join(root, id, 'timeline.json'),
+    JSON.stringify({ schemaVersion: 1, events }),
+  );
+  if (speech !== undefined) {
+    fs.writeFileSync(
+      path.join(root, id, 'speech.ndjson'),
+      speech.map((s) => JSON.stringify(s)).join('\n') + (speech.length ? '\n' : ''),
+    );
+  }
+  return { root, id };
+}
+
+const NAV = (t, pageUrl) => ({ type: 'navigation', t, pageUrl, trigger: 'pushState' });
+const SAID = (t, text) => ({ type: 'speech', t, tEnd: t + 900, pageUrl: '', text, provisional: true });
+
+test('readSessionEvents merges narration into the timeline in time order', async () => {
+  const { root, id } = sessionFixture({
+    events: [NAV(0, 'https://x.test/a'), { type: 'click', t: 4000, pageUrl: 'https://x.test/a' }],
+    speech: [SAID(2000, 'about to click this')],
+  });
+  const out = await readSessionEvents(root, id);
+  assert.deepEqual(out.map((e) => e.type), ['navigation', 'speech', 'click']);
+});
+
+test('readSessionEvents derives the page each line was spoken on', async () => {
+  const { root, id } = sessionFixture({
+    events: [NAV(0, 'https://x.test/board'), NAV(5000, 'https://x.test/board/card-1')],
+    // The bug this fixes: both lines ship pageUrl:'' from capture, and the
+    // extension's own fallback would file BOTH under the session start url.
+    speech: [SAID(1000, 'on the board'), SAID(6000, 'now in the card')],
+  });
+  const said = (await readSessionEvents(root, id)).filter((e) => e.type === 'speech');
+  assert.equal(said[0].pageUrl, 'https://x.test/board');
+  assert.equal(said[1].pageUrl, 'https://x.test/board/card-1');
+});
+
+test('readSessionEvents keeps the provisional flag so a caller can weigh the quote', async () => {
+  const { root, id } = sessionFixture({ events: [NAV(0, 'https://x.test/')], speech: [SAID(10, 'maybe')] });
+  const [, said] = await readSessionEvents(root, id);
+  assert.equal(said.provisional, true);
+});
+
+test('readSessionEvents is unchanged when a session has no narration', async () => {
+  const events = [NAV(0, 'https://x.test/'), { type: 'click', t: 1, pageUrl: 'https://x.test/' }];
+  for (const speech of [undefined, []]) {
+    const { root, id } = sessionFixture({ events, speech });
+    assert.deepEqual(await readSessionEvents(root, id), events, `speech=${JSON.stringify(speech)}`);
+  }
+});
+
+test('readSessionEvents survives a half-written narration line', async () => {
+  const { root, id } = sessionFixture({ events: [NAV(0, 'https://x.test/')], speech: [SAID(10, 'good')] });
+  fs.appendFileSync(path.join(root, id, 'speech.ndjson'), '{"type":"speech","t":20,"tex');
+  const out = await readSessionEvents(root, id);
+  assert.equal(out.filter((e) => e.type === 'speech').length, 1, 'the whole line survives, the partial is dropped');
 });
