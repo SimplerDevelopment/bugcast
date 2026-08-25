@@ -28,7 +28,7 @@
     "local-first"
   ],
   "scripts": {
-    "test": "node --test \"src/*.test.mjs\"",
+    "test": "node --test src/*.test.mjs",
     "smoke": "node scripts/smoke.mjs && node scripts/channel-smoke.mjs"
   },
   "dependencies": {
