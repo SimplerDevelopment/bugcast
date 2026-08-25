@@ -21,6 +21,7 @@
  */
 
 import { idbGet } from '../lib/idb';
+import { advance, availableSamples, flatten, newCursor } from '../lib/pcm';
 import { cleanSegments, toSpeechEvents } from '../lib/srt';
 import type { PlannedFrame } from '../lib/frames';
 import { extractFrames } from './frames';
@@ -81,13 +82,19 @@ let tier: ModelTier = DEFAULT_TIER;
 /**
  * Rolling live transcription.
  *
- * Ten seconds is a compromise: shorter gives a consumer fresher narration and
- * worse text, because Whisper leans on context and a clipped window has less of
- * it. Everything emitted here is provisional and superseded at stop, so
- * boundary damage is acceptable by construction — but it is real, and a word
- * split across two windows is mangled in both.
+ * Thirty seconds, because that is what Whisper's encoder processes no matter
+ * what it is handed — the mel input is a fixed 30s window and anything shorter
+ * is padded to fill it. Ten seconds therefore cost exactly what thirty costs
+ * and bought a third of the audio, which is how the live pass ended up running
+ * at roughly a fifteenth of realtime: two windows in a 148-second session.
+ *
+ * Longer is also better text, because Whisper leans on context and a clipped
+ * window has less of it. The price is latency — nothing is emitted until thirty
+ * seconds of narration exist. Everything here is provisional and superseded at
+ * stop, so boundary damage is acceptable by construction, but it is real: a
+ * word split across two windows is mangled in both.
  */
-const LIVE_WINDOW_SAMPLES = 16_000 * 10;
+const LIVE_WINDOW_SAMPLES = 16_000 * 30;
 
 /** Samples already sent to the live pass, counted from the start of the session. */
 let liveOffset = 0;
@@ -121,53 +128,40 @@ function appendSpeech(lines: string[]): void {
 }
 
 /**
- * Samples consumed and discarded, so the live pass never rescans the session.
- *
- * `flatten` used to walk the chunk list from index 0 every window, and the list
- * grows for the whole recording — ~14,000 chunks after fifteen minutes, walked
- * every two seconds, on the same thread as MediaRecorder. Consumed chunks are
- * dropped and this records how many samples they held.
+ * How far the live pass has read. See `lib/pcm` for why this is a cursor and
+ * not, as it once was, a destructive shift off the front of the buffer.
  */
-let discarded = 0;
-
-function flatten(chunks: Float32Array[], from: number, to: number): Float32Array {
-  const out = new Float32Array(to - from);
-  let seen = 0;
-  let written = 0;
-  for (const chunk of chunks) {
-    const start = Math.max(from, seen);
-    const end = Math.min(to, seen + chunk.length);
-    if (end > start) {
-      out.set(chunk.subarray(start - seen, end - seen), written);
-      written += end - start;
-    }
-    seen += chunk.length;
-    if (seen >= to) break;
-  }
-  return out;
-}
+let cursor = newCursor();
 
 async function transcribeLiveWindow(state: Live): Promise<void> {
   if (liveBusy) return; // a window still running; the next tick will catch up
-  const available = discarded + state.pcm.reduce((n, c) => n + c.length, 0);
-  if (available - liveOffset < LIVE_WINDOW_SAMPLES) return;
+  if (availableSamples(state.pcm, cursor) - liveOffset < LIVE_WINDOW_SAMPLES) return;
 
   liveBusy = true;
   const from = liveOffset;
   const to = from + LIVE_WINDOW_SAMPLES;
   liveOffset = to;
+  const startedAt = performance.now();
   try {
-    const window = flatten(state.pcm, from - discarded, to - discarded);
+    const window = flatten(state.pcm, from, to, cursor);
 
-    // Drop what has been consumed. The authoritative pass at stop reads the
-    // whole recording back from video.webm rather than from this buffer, so
-    // nothing needs it after transcription.
-    while (state.pcm.length && discarded + state.pcm[0]!.length <= to) {
-      discarded += state.pcm.shift()!.length;
-    }
+    // Move past what this window consumed. Nothing is deleted: stop()
+    // transcribes this same buffer, from the beginning of the session.
+    advance(state.pcm, to, cursor);
 
     const segments = cleanSegments(
       await transformersEngine(tier).transcribe(window, (from / 16_000) * 1000),
+    );
+
+    // Measured, because "the live pass is slow" was a complaint nobody had a
+    // number for. A window that takes longer than the audio it covers means
+    // the live pass is losing ground and will never catch up.
+    const took = Math.round(performance.now() - startedAt);
+    const covers = LIVE_WINDOW_SAMPLES / 16;
+    console.debug(
+      `[bugcast] live window ${(from / 16_000).toFixed(0)}s–${(to / 16_000).toFixed(0)}s: ` +
+        `${took}ms for ${covers}ms of audio (${(took / covers).toFixed(2)}x realtime, ` +
+        `${segments.length} segments, ${tier})${took > covers ? ' — LOSING GROUND' : ''}`,
     );
     if (segments.length) {
       appendSpeech(
@@ -262,7 +256,7 @@ async function start(msg: {
   // one that used to lose the video entirely.
   speechStream = await openSpeechStream(msg.sessionId).catch(() => null);
   liveOffset = 0;
-  discarded = 0;
+  cursor = newCursor();
 
   let streamError: string | null = null;
   const writable = await openSessionStream(msg.sessionId).catch((e) => {
@@ -348,6 +342,12 @@ async function stop(): Promise<unknown> {
   await state.writable?.close();
 
   // One flat buffer for the transcription engine (#6).
+  //
+  // The whole session, from t0 — which is why the live pass moves a cursor
+  // instead of shifting chunks off the front. It ate this buffer once, and the
+  // authoritative pass silently transcribed only the leftovers and stamped them
+  // from zero. `transcribe(samples, 0)` is correct precisely because sample 0
+  // here is still sample 0 of the recording.
   const total = state.pcm.reduce((n, chunk) => n + chunk.length, 0);
   const samples = new Float32Array(total);
   let offset = 0;
