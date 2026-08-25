@@ -100,6 +100,19 @@ export function Options() {
             type="password"
             value={settings.openaiApiKey}
             onChange={(e) => void set('openaiApiKey', e.target.value)}
+            // Asked for on the way out of the field, not per keystroke.
+            //
+            // An extension only bypasses CORS for hosts it holds permission
+            // for, and `optional_host_permissions` grants nothing until it is
+            // requested — so without this the POST to OpenAI depends entirely
+            // on their response headers permitting a chrome-extension origin.
+            // The tests inject a fake fetch, so that dependency was never
+            // exercised. Requesting it here keeps the install prompt clean for
+            // everyone who never pastes a key.
+            onBlur={() => {
+              if (!settings.openaiApiKey.trim()) return;
+              void chrome.permissions.request({ origins: ['https://api.openai.com/*'] });
+            }}
             placeholder="sk-… — leave empty to transcribe locally"
             spellCheck={false}
             autoComplete="off"
@@ -113,7 +126,7 @@ export function Options() {
           </p>
         </Field>
 
-        <Field label={settings.openaiApiKey ? 'Local model (unused while a key is set)' : 'Model'}>
+        <Field label={settings.openaiApiKey ? 'Local model (used for the live pass)' : 'Model'}>
           <select
             value={settings.modelTier}
             onChange={(e) => void set('modelTier', e.target.value as ModelTier)}
@@ -127,7 +140,7 @@ export function Options() {
           </select>
           <p className="mt-1 text-xs text-neutral-500">
             {settings.openaiApiKey
-              ? 'Used only if you clear the key above. Transcription is running on OpenAI.'
+              ? 'Still used while recording, for the provisional narration an agent can follow live — that pass is replaced at stop and is not worth paying for twice. The transcript you keep comes from OpenAI. Turn off transcribe-while-recording above if you would rather not download this at all.'
               : 'Downloads once and is cached. Changing tier downloads the new one on the next recording.'}
           </p>
         </Field>

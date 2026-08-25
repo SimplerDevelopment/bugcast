@@ -44,6 +44,13 @@ export function App() {
   const [hosted, setHosted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  /**
+   * Transcription is failing right now — almost always a key that is wrong,
+   * expired, or rate limited. Worth its own line rather than the shared note,
+   * because it persists across popup opens and does not clear itself: silence
+   * is what this looks like otherwise, and silence reads as "still thinking".
+   */
+  const [liveError, setLiveError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [ready, setReady] = useState(false);
   const [checks, setChecks] = useState<CheckResult[] | null>(null);
@@ -73,6 +80,7 @@ export function App() {
         'lastSession',
         'recording',
         'openaiApiKey',
+        'liveError',
       ]);
       setRecording(Boolean(stored?.recording));
       setTier((stored?.modelTier as ModelTier) ?? DEFAULT_TIER);
@@ -80,6 +88,7 @@ export function App() {
       // The key itself never enters popup state — only whether one exists.
       setHosted(Boolean(stored?.openaiApiKey));
       setLast(stored?.lastSession ?? null);
+      setLiveError((stored?.liveError as string) ?? null);
       setReady(true);
 
       void storedSessionDirectory().then((h) => setFolder(h?.name ?? null));
@@ -335,6 +344,20 @@ export function App() {
         </button>
       </div>
 
+      {liveError && (
+        <p className="rounded border border-amber-300 bg-amber-50 px-2 py-1 text-xs text-amber-900">
+          {liveError}
+          <button
+            onClick={() => {
+              setLiveError(null);
+              void chrome.storage.local.remove('liveError');
+            }}
+            className="ml-2 underline"
+          >
+            dismiss
+          </button>
+        </p>
+      )}
       {note && <p className="text-xs text-neutral-600 break-all">{note}</p>}
       {error && <p className="text-xs text-red-600">{error}</p>}
 
