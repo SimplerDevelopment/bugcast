@@ -32,6 +32,12 @@ import {
   type ModelTier,
   type TranscriptionEngine,
 } from './transcribe';
+import {
+  installNativeSpeech,
+  nativeSpeechStatus,
+  startNativeSpeech,
+  type NativeSpeechSession,
+} from './native-speech';
 import { selectEngine } from './hosted';
 import {
   CHUNK_MS,
@@ -70,6 +76,8 @@ interface Live {
   bytes: number;
   /** Drives rolling live transcription. */
   liveTimer: number;
+  /** Chrome's on-device pass, when it is doing the live work instead of Whisper. */
+  native: NativeSpeechSession | null;
 }
 
 let live: Live | null = null;
@@ -154,6 +162,12 @@ const LIVE_WINDOW_SAMPLES = 16_000 * 30;
 let liveOffset = 0;
 let liveBusy = false;
 
+/** `MediaRecorder.start()`, in epoch ms. The clock every `t` is measured from. */
+let t0 = 0;
+
+/** Ticks that produced no window, for the heartbeat above. */
+let liveWaits = 0;
+
 /**
  * speech.ndjson, owned here rather than by the worker.
  *
@@ -174,9 +188,11 @@ function appendSpeech(lines: string[]): void {
       await w.write(batch);
       await w.close();
       speechStream!.bytes += new TextEncoder().encode(batch).length;
-    } catch {
+    } catch (e) {
       // A failed narration write costs narration. Capture is unaffected, which
-      // is the entire point of keeping these apart.
+      // is the entire point of keeping these apart — but "costs narration"
+      // silently is how a 0-byte speech.ndjson reads as "nobody said anything".
+      console.warn('[bugcast] narration write failed', e);
     }
   });
 }
@@ -189,7 +205,24 @@ let cursor = newCursor();
 
 async function transcribeLiveWindow(state: Live): Promise<void> {
   if (liveBusy) return; // a window still running; the next tick will catch up
-  if (availableSamples(state.pcm, cursor) - liveOffset < LIVE_WINDOW_SAMPLES) return;
+  const available = availableSamples(state.pcm, cursor);
+  if (available - liveOffset < LIVE_WINDOW_SAMPLES) {
+    // Says which kind of "not yet" this is.
+    //
+    // An empty speech.ndjson has three causes that look identical from the
+    // artifact: the model is still downloading, the microphone was never
+    // granted so the tap has nothing to give, or a window threw. Reporting the
+    // buffer every thirty seconds separates the second from the other two —
+    // audio stuck at 0.0s is a microphone that is not connected, and audio
+    // climbing while nothing is emitted is the model still coming down.
+    if (++liveWaits % 15 === 0) {
+      console.debug(
+        `[bugcast] no window yet — ${(available / 16_000).toFixed(1)}s of mic audio buffered, ` +
+          `need ${LIVE_WINDOW_SAMPLES / 16_000}s past ${(liveOffset / 16_000).toFixed(0)}s`,
+      );
+    }
+    return;
+  }
 
   liveBusy = true;
   const from = liveOffset;
@@ -229,13 +262,16 @@ async function transcribeLiveWindow(state: Live): Promise<void> {
     // authoritative pass at stop reads the whole audio regardless. What changed
     // is that it no longer costs the *reason*.
     //
-    // This block used to be bare. It was written when the only engine was local
-    // and a failure meant a bad thirty seconds of audio; it now also catches a
-    // typo'd API key, an expired one, and a rate limit — none of which are
-    // transient, all of which produce ten minutes of silence and no explanation
-    // if nobody is told. AGENTS.md: refuse, don't degrade.
+    // This block used to be bare, and an empty speech.ndjson therefore looked
+    // identical whether the model was still downloading, the microphone was
+    // never granted, a window had thrown, or — since the hosted engine landed —
+    // the API key was typo'd, expired, or rate-limited. Several different
+    // problems, one symptom, no way to tell them apart from the artifact. The
+    // hosted ones are the sharpest, because none of them are transient: they
+    // produce ten minutes of silence and no explanation if nobody is told.
+    // AGENTS.md: refuse, don't degrade.
     liveFailures++;
-    console.warn(`[bugcast] live window ${(from / 16_000).toFixed(0)}s failed`, e);
+    console.warn(`[bugcast] live window at ${(from / 16_000).toFixed(0)}s failed`, e);
     if (liveFailures === LIVE_FAILURE_REPORT_AT) {
       void chrome.runtime.sendMessage({
         type: OFFSCREEN_ERROR,
@@ -330,6 +366,7 @@ async function start(msg: {
   speechStream = await openSpeechStream(msg.sessionId).catch(() => null);
   liveOffset = 0;
   liveFailures = 0;
+  liveWaits = 0;
   cursor = newCursor();
 
   let streamError: string | null = null;
@@ -347,6 +384,7 @@ async function start(msg: {
     pcm,
     bytes: 0,
     liveTimer: 0,
+    native: null,
   };
 
   state.recorder.ondataavailable = (e) => {
@@ -372,13 +410,8 @@ async function start(msg: {
   liveBusy = false;
   // Off means the session still gets a full transcript at stop — it just is not
   // readable while recording, and the CPU stays with the app under test.
-  state.liveTimer =
-    msg.liveTranscription === false
-      ? 0
-      : (setInterval(() => void transcribeLiveWindow(state), 2_000) as unknown as number);
-
   state.recorder.start(CHUNK_MS);
-  const t0 = Date.now();
+  t0 = Date.now();
   // The tap has been live since it was connected, a few milliseconds before
   // this. Dropping what it collected makes the audio buffer start at t0 exactly
   // — cheaper and more honest than carrying an offset nobody can verify.
@@ -386,6 +419,52 @@ async function start(msg: {
 
   live = state;
   tier = msg.tier ?? DEFAULT_TIER;
+
+  // The live pass, if it was asked for. Off means the session still gets a full
+  // transcript at stop — it just is not readable while recording, and the CPU
+  // stays with the app under test.
+  //
+  // Chrome's on-device recogniser is preferred when it is ready, for one
+  // reason: latency. Whisper spends thirty seconds of encoder work on a
+  // thirty-second window, so narration reaches a following agent long after it
+  // was said, and "follow along live" stops meaning anything. Chrome returns a
+  // phrase about as fast as you finish it.
+  //
+  // Whatever it produces is provisional and replaced wholesale at stop, so the
+  // looser timestamps it carries never reach the transcript that is kept.
+  if (msg.liveTranscription !== false) {
+    const status = await nativeSpeechStatus().catch(() => 'unavailable' as const);
+    if (status === 'available') {
+      state.native = startNativeSpeech(
+        () => Date.now() - t0,
+        (line) =>
+          appendSpeech([
+            JSON.stringify({
+              type: 'speech',
+              t: line.t,
+              tEnd: line.tEnd,
+              pageUrl: '',
+              text: line.text,
+              provisional: true,
+            }),
+          ]),
+      );
+    } else if (status === 'downloadable') {
+      // Fetched for next time. This session falls back rather than waiting on a
+      // download, which is the mistake the Whisper model already taught us.
+      void installNativeSpeech();
+    }
+
+    if (!state.native) {
+      console.debug(`[bugcast] live pass: Whisper (on-device speech is "${status}")`);
+      state.liveTimer = setInterval(
+        () => void transcribeLiveWindow(state),
+        2_000,
+      ) as unknown as number;
+    } else {
+      console.debug('[bugcast] live pass: Chrome on-device speech');
+    }
+  }
   apiKey = msg.openaiApiKey ?? '';
   return {
     type: OFFSCREEN_STARTED,
@@ -403,6 +482,7 @@ async function stop(): Promise<unknown> {
   if (!state) return { ok: true };
 
   clearInterval(state.liveTimer);
+  state.native?.stop();
   await speechWrites;
   await new Promise<void>((resolve) => {
     state.recorder.onstop = () => resolve();

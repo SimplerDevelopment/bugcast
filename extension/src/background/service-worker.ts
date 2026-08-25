@@ -4,7 +4,7 @@ import { PageCapture } from '../lib/cdp-page';
 import type { TimelineEvent } from '../lib/events';
 import { DefaultRedactor } from '../lib/redact';
 import { SCHEMA_VERSION } from '../lib/events';
-import { sessionId, storedSessionDirectory, writeFile } from '../lib/session-store';
+import { sessionId, storedSessionDirectory, writeFile, permissionState} from '../lib/session-store';
 import { renderReport } from '../lib/report';
 import { pageUrlResolver, toSpeechEvents, toSrt, type Segment } from '../lib/srt';
 import { planFrames } from '../lib/frames';
@@ -127,6 +127,39 @@ async function start(
   wantVideo = true,
 ): Promise<Response> {
   if (active) return { ok: true, recording: true };
+
+  // Checked before anything else, because a folder that cannot be written is
+  // not a degraded session — it is a session that does not exist.
+  //
+  // Chrome drops a File System Access grant when it restarts, keeping the
+  // handle and downgrading the permission to `prompt` (see session-store.ts).
+  // Only a click inside an extension page can re-grant it, which the popup does
+  // before it calls this — but the keyboard shortcut calls straight through,
+  // and its own comment already said start "needs a folder permission that only
+  // a click inside an extension page can re-grant, so when it is not already
+  // granted the honest move is to say so rather than half-start". It did not
+  // say so. It half-started.
+  //
+  // What that looked like: every file opened at start — events.ndjson,
+  // video.webm, speech.ndjson — failed and was swallowed, while the files
+  // written at stop succeeded because by then the popup had been opened to
+  // press Stop and had re-granted on the way. Four and a half minutes of
+  // recording produced a folder with a manifest, a timeline, and no recording.
+  //
+  // No handle at all is a different case and stays allowed: that is the zip
+  // fallback, which is a designed degradation rather than a broken grant.
+  const folder = await storedSessionDirectory();
+  if (folder && (await permissionState(folder)) !== 'granted') {
+    const error =
+      `Chrome dropped permission for the "${folder.name}" folder — it does that on restart. ` +
+      `Open the Bugcast popup and press Record there to grant it again; the keyboard shortcut cannot.`;
+    // Persisted, because the shortcut has no UI: without this the only symptom
+    // is a badge that says nothing.
+    await chrome.storage.local.set({
+      lastSession: { id: 'not-started', written: null, writeError: error, events: 0, frames: 0 },
+    });
+    return { error };
+  }
 
   const tab =
     tabId == null
