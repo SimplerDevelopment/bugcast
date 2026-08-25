@@ -1,7 +1,7 @@
 # Transcription architecture decision
 
 Type: grilling
-Status: resolved
+Status: resolved, amended 2026-08-25
 Blocked by: 03
 
 ## Question
@@ -89,6 +89,66 @@ The mic records unless explicitly disabled; narration is the point of the tool, 
 the default reflects it. Permission is requested on first record. A session with
 no microphone or no speech simply produces **no `.srt`** — the event timeline is
 unaffected and the session remains valid. No branching beyond "was there audio".
+
+### Amendment, 2026-08-25 — an optional hosted engine
+
+The `engine → segments → SRT` seam above was kept open for "a
+bring-your-own-whisper.cpp path". The first thing through it is not whisper.cpp;
+it is a hosted API, added as `offscreen/hosted.ts`. Default remains local and
+unchanged: with no key configured, nothing about this ADR's original answer
+moves.
+
+**What forced it.** The local tiers top out at `small.en` and ship `base.en`,
+and the shipped model is weakest exactly where a QA transcript carries its
+meaning — proper nouns and alphanumeric ids. Session `2026-08-25T16-45-05`
+rendered a ticket SKU "SITE79-001" as "site 79-001" and looped "So, research
+would open whisper" across four consecutive segments. The loop is a Whisper
+decoding pathology rather than a windowing artefact: the authoritative
+full-audio pass produced it too, so no window size and no tier within reach
+fixes it. Live accuracy is also the only accuracy available, because there is
+no second, better pass to recover from.
+
+**This contradicts a stated non-negotiable, and that should be read, not
+skipped.** `map.md` lists "Anything hosted" under Out of scope and calls the
+constraint "the product's identity, not a v1 shortcut". This ADR narrowed the
+claim usefully — *"'Fully local' is a promise about your data, not network
+abstinence"* — but hosted transcription does not fit inside that narrowing: the
+audio **is** your data, and it now leaves the machine. The one-time model
+download was network abstinence; this is not.
+
+The exception is deliberately bounded:
+
+- **Off by default.** No key means the local engine, byte for byte as before.
+- **The user's own key**, held in `chrome.storage.local` and never in the
+  bundle — an extension's source is readable by anyone who installs it.
+- **Transcription only.** Video, events, timeline and every artifact stay local.
+  No server, no account, no sharing link, no telemetry.
+- **Reversible.** Clearing the key restores the original behaviour with no
+  migration.
+
+Where the UI previously promised "Nothing is uploaded", it now reads the
+setting and says which is true.
+
+**Model choice: `whisper-1`, not `gpt-4o-transcribe`.** The latter is the more
+accurate model on the same endpoint, and is still the wrong one here: per-segment
+timestamps are the entire product of this path, `timestamp_granularities`
+requires `response_format: verbose_json`, and `gpt-4o-transcribe` does not
+support it. It returns text only, which would collapse a session to one
+unplaceable blob. Revisit if that endpoint gains timestamps.
+
+**Chunking, which the post-hoc decision above did not anticipate.** The endpoint
+caps an upload at 25 MB. This audio is 16 kHz mono 16-bit — 32 KB/s — so the cap
+lands near thirteen minutes, and the session that motivated this ran 12.5. Long
+sessions are split at eight-minute boundaries and offset back onto the session
+clock. One hard cut per chunk mangles a word the way a live-window boundary
+does; splitting on a silence trough would remove that and is not worth the
+machinery until a transcript is seen to suffer.
+
+**Not a fallback chain.** A hosted failure throws rather than retrying locally.
+Rescuing a failed window would mean starting a ~105 MB model download
+mid-recording, which costs more than the window is worth. A failed live window
+is lost and the next continues; a failed pass at stop is recorded as
+`transcriptError` on the session.
 
 ### Consequences for other tickets
 

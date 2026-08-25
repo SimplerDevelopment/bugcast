@@ -3,7 +3,7 @@
 **Record a QA session. Get files you own.**
 
 Press record, narrate what you're doing, and Bugcast captures the browser video,
-transcribes your narration to SRT locally, and writes a correlated timeline of
+transcribes your narration to SRT, and writes a correlated timeline of
 everything that happened — page navigations, the elements you clicked, console
 output, and failed network calls *with their response bodies* — all on one clock.
 
@@ -21,9 +21,15 @@ Then hand the folder to a coding agent.
   frames/            # a JPEG at each event boundary
 ```
 
-**Everything runs locally.** No account, no upload, no telemetry. Core recording
+**Everything runs locally by default.** No account, no telemetry. Core recording
 makes zero network calls — the only network access at all is downloading the
 Whisper model once, and there's an offline path for that too.
+
+The single exception is opt-in and off unless you turn it on: supplying an
+OpenAI API key in Settings sends session **audio** to OpenAI for transcription,
+because the local model is not accurate enough on names and ticket ids to trust
+for filing tickets. Everything else — video, events, timeline, artifacts — stays
+on disk either way, and clearing the key restores fully-local behaviour.
 
 ---
 
@@ -38,6 +44,9 @@ Bugcast writes real session data to disk, and you will hand it to something.
 - **Video and frames capture whatever was on screen in that tab.** Password
   fields render as dots; an API key displayed in a settings page does not.
 - **Don't record production with real customer data.**
+- **Hosted transcription sends your narration to OpenAI** if you configure a
+  key. Whatever you say out loud while recording — including a customer name you
+  read off the screen — goes with it. Leave the key empty to keep audio local.
 
 By default, typed values are **not** captured — a field records that it changed
 and roughly what shape the value had, never the characters. Authorization and
@@ -81,6 +90,9 @@ why the obvious `whisper.cpp` approach doesn't work.
 
 ### The first recording downloads a model
 
+This section applies to local transcription — the default. With a hosted key
+configured there is no download and none of the blocking below applies.
+
 Transcription is local, so the first session has to fetch the Whisper weights
 (`base.en` by default) before it can produce a single word. Until that lands:
 
@@ -105,7 +117,7 @@ Right-click the icon → **Options**, or the **Settings** link in the popup.
 |---|---|
 | **Recording** | Video on/off; transcribe-while-recording on/off (it costs CPU alongside the app you're testing) |
 | **Microphone** | Which input device, and the one-time permission grant |
-| **Transcription** | Model tier — bigger is more accurate and a larger one-time download |
+| **Transcription** | An optional OpenAI API key, and the local model tier used when there is none. The key is far more accurate on names and ticket ids and avoids the repetition loops the local model falls into — at the cost of sending audio to OpenAI, billed to your account. Stored on this device, never bundled. |
 | **Privacy** | Whether typed values are captured. Off by default. |
 | **Sessions** | Where sessions are written |
 | **Shortcuts** | What actually bound, and how to change it |

@@ -25,7 +25,14 @@ import { advance, availableSamples, flatten, newCursor } from '../lib/pcm';
 import { cleanSegments, toSpeechEvents } from '../lib/srt';
 import type { PlannedFrame } from '../lib/frames';
 import { extractFrames } from './frames';
-import { DEFAULT_TIER, DEVICE, transformersEngine, type ModelTier } from './transcribe';
+import {
+  DEFAULT_TIER,
+  DEVICE,
+  transformersEngine,
+  type ModelTier,
+  type TranscriptionEngine,
+} from './transcribe';
+import { hostedEngine, HOSTED_MODEL } from './hosted';
 import {
   CHUNK_MS,
   pickMimeType,
@@ -78,6 +85,25 @@ let lastBuffered: Blob[] = [];
 
 /** Set at start, because it cannot be read from here. */
 let tier: ModelTier = DEFAULT_TIER;
+
+/** Set at start, same reason as `tier`. Empty means transcribe locally. */
+let apiKey = '';
+
+/**
+ * Hosted when a key is configured, local otherwise.
+ *
+ * Not a fallback chain. A hosted failure throws rather than quietly retrying
+ * locally, because the local path is a ~105MB model download this session has
+ * deliberately not paid for — starting one mid-recording to rescue a failed
+ * window would cost more than the window. A failed live window is lost and the
+ * next one continues; a failed pass at stop is recorded as `transcriptError`.
+ */
+function engine(): TranscriptionEngine {
+  return apiKey ? hostedEngine(apiKey) : transformersEngine(tier);
+}
+
+/** Whatever the measurement line below should call the engine in use. */
+const engineLabel = (): string => (apiKey ? HOSTED_MODEL : tier);
 
 /**
  * Rolling live transcription.
@@ -150,7 +176,7 @@ async function transcribeLiveWindow(state: Live): Promise<void> {
     advance(state.pcm, to, cursor);
 
     const segments = cleanSegments(
-      await transformersEngine(tier).transcribe(window, (from / 16_000) * 1000),
+      await engine().transcribe(window, (from / 16_000) * 1000),
     );
 
     // Measured, because "the live pass is slow" was a complaint nobody had a
@@ -161,7 +187,7 @@ async function transcribeLiveWindow(state: Live): Promise<void> {
     console.debug(
       `[bugcast] live window ${(from / 16_000).toFixed(0)}s–${(to / 16_000).toFixed(0)}s: ` +
         `${took}ms for ${covers}ms of audio (${(took / covers).toFixed(2)}x realtime, ` +
-        `${segments.length} segments, ${tier})${took > covers ? ' — LOSING GROUND' : ''}`,
+        `${segments.length} segments, ${engineLabel()})${took > covers ? ' — LOSING GROUND' : ''}`,
     );
     if (segments.length) {
       appendSpeech(
@@ -207,6 +233,8 @@ async function start(msg: {
    * the truth. Same reason the popup passes tabId and pageUrl to the worker.
    */
   tier: ModelTier;
+  /** Same reason as `tier`. Empty means transcribe locally. */
+  openaiApiKey?: string;
   /** Empty means the system default input. */
   micDeviceId?: string;
   liveTranscription?: boolean;
@@ -312,6 +340,7 @@ async function start(msg: {
 
   live = state;
   tier = msg.tier ?? DEFAULT_TIER;
+  apiKey = msg.openaiApiKey ?? '';
   return {
     type: OFFSCREEN_STARTED,
     t0,
@@ -362,7 +391,7 @@ async function stop(): Promise<unknown> {
   let segments: ReturnType<typeof cleanSegments> = [];
   let transcriptError: string | null = null;
   try {
-    segments = cleanSegments(await transformersEngine(tier).transcribe(samples, 0));
+    segments = cleanSegments(await engine().transcribe(samples, 0));
   } catch (e) {
     // No speech means no .srt, and a transcription failure must not cost the
     // session — every other artifact is already complete by this point.

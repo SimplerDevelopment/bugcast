@@ -30,6 +30,19 @@ export interface Settings {
    * on — the toggle relaxes the default, it does not disable detection.
    */
   typedValues: boolean;
+  /**
+   * OpenAI key for hosted transcription. Empty means the local model.
+   *
+   * User-supplied and kept in `chrome.storage.local`, never in the bundle —
+   * an extension's source is readable by anyone who installs it, so a shipped
+   * key is a published key. That is also why this is the operator's own key on
+   * the operator's own machine rather than a service credential: the blast
+   * radius of a leak is one billing account they control.
+   *
+   * Setting it sends session audio to OpenAI. Leave it empty to keep every
+   * byte local.
+   */
+  openaiApiKey: string;
 }
 
 export const DEFAULTS: Settings = {
@@ -38,6 +51,7 @@ export const DEFAULTS: Settings = {
   liveTranscription: true,
   video: true,
   typedValues: false,
+  openaiApiKey: '',
 };
 
 export async function loadSettings(): Promise<Settings> {

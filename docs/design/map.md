@@ -17,12 +17,16 @@ the destination is a working published repo, not a spec.
 ## Notes
 
 - **Domain:** Chrome MV3 extension + optional local sidecar process + local ASR
-  (whisper.cpp / transformers.js). No hosted component of any kind.
+  (whisper.cpp / transformers.js). No hosted component of any kind — amended
+  2026-08-25 to allow one opt-in exception, hosted transcription; see Out of
+  scope below and [ticket 07](issues/07-transcription-architecture-decision.md).
 - **Audience (settled at charting):** built for Dan first, but *any developer*
   must be able to run it. OS-agnostic — nothing may hard-code Homebrew paths,
   `/opt/homebrew`, or assume Apple Silicon.
 - **Non-negotiables:** free, open source, fully local. Core function makes zero
-  network calls. No accounts, no upload, no telemetry.
+  network calls. No accounts, no upload, no telemetry. *(Amended 2026-08-25:
+  still true by default. Configuring a transcription API key opts that one
+  subsystem out — see Out of scope.)*
 - **Prior art surveyed at charting:** Skreno (transcript + console + network +
   clicks + MCP, hosted, $10-15/mo), DevRecorder (video + console + network +
   navigation + MCP, free, no audio), PlayLog, BugReel, Vibe Feedback. None
@@ -401,8 +405,19 @@ the destination is a working published repo, not a spec.
 
 ## Out of scope
 
-- **Anything hosted.** No server, no accounts, no upload, no sharing links. Local
-  files only; that constraint is the product's identity, not a v1 shortcut.
+- **Anything hosted** — with one bounded exception, added 2026-08-25. No server,
+  no accounts, no sharing links, no telemetry: local files only, and that
+  constraint is still the product's identity rather than a v1 shortcut.
+
+  The exception is **transcription**, opt-in and off by default. Supplying your
+  own API key sends session *audio* to that provider because the local model is
+  not accurate enough on names and ticket ids to be trusted for filing tickets.
+  Nothing else moves — video, events and every artifact stay on disk — and
+  clearing the key restores the original behaviour exactly.
+
+  Recorded rather than quietly amended, because this crosses a line the map
+  called identity. The reasoning, and the argument against it, are in
+  [ticket 07](issues/07-transcription-architecture-decision.md).
 - **Cross-browser.** Chrome/Chromium only. Firefox and Safari have neither the
   debugger API shape nor the extension model this depends on.
 - **Non-developer packaging.** Settled at charting: the audience is developers.

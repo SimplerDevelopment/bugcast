@@ -935,6 +935,7 @@ async function startCapture(
     // the recording.
     withMic: true,
     tier: settings.modelTier,
+    openaiApiKey: settings.openaiApiKey,
     micDeviceId: settings.micDeviceId,
     liveTranscription: settings.liveTranscription,
   });

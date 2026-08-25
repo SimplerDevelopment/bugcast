@@ -41,6 +41,7 @@ export function App() {
   const [folder, setFolder] = useState<string | null>(null);
   const [tier, setTier] = useState<ModelTier>(DEFAULT_TIER);
   const [video, setVideo] = useState(true);
+  const [hosted, setHosted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -71,10 +72,13 @@ export function App() {
         'video',
         'lastSession',
         'recording',
+        'openaiApiKey',
       ]);
       setRecording(Boolean(stored?.recording));
       setTier((stored?.modelTier as ModelTier) ?? DEFAULT_TIER);
       setVideo(stored?.video !== false);
+      // The key itself never enters popup state — only whether one exists.
+      setHosted(Boolean(stored?.openaiApiKey));
       setLast(stored?.lastSession ?? null);
       setReady(true);
 
@@ -253,9 +257,12 @@ export function App() {
     return (
       <Shell>
         <p className="text-xs text-neutral-600">
-          Sessions are written to a folder you choose. Nothing is uploaded — transcription runs on
-          this machine. Choosing <code>~/bugcast-sessions</code> means the MCP server finds them
-          with no configuration.
+          Sessions are written to a folder you choose.{' '}
+          {hosted
+            ? 'Session audio is sent to OpenAI for transcription; nothing else leaves this machine.'
+            : 'Nothing is uploaded — transcription runs on this machine.'}{' '}
+          Choosing <code>~/bugcast-sessions</code> means the MCP server finds them with no
+          configuration.
         </p>
         <button
           onClick={choose}
@@ -264,7 +271,9 @@ export function App() {
           Choose a folder for sessions
         </button>
         <label className="block space-y-1">
-          <span className="text-xs font-medium text-neutral-700">Transcription quality</span>
+          <span className="text-xs font-medium text-neutral-700">
+            {hosted ? 'Local model (unused — a hosted key is set)' : 'Transcription quality'}
+          </span>
           <select
             value={tier}
             onChange={(e) => void chooseTier(e.target.value as ModelTier)}
@@ -278,9 +287,9 @@ export function App() {
           </select>
         </label>
         <p className="text-[11px] leading-snug text-neutral-500">
-          The speech model downloads once, the first time you record with a microphone, and is
-          cached after that. The first run can take a couple of minutes on a slow connection —
-          nothing is wrong if it sits there.
+          {hosted
+            ? 'Transcription is running on OpenAI. This model is only used if you clear the key in settings.'
+            : 'The speech model downloads once, the first time you record with a microphone, and is cached after that. The first run can take a couple of minutes on a slow connection — nothing is wrong if it sits there.'}
         </p>
         {error && <p className="text-xs text-red-600">{error}</p>}
       </Shell>
