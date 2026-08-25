@@ -55,15 +55,23 @@ const isOurs = (url: string): boolean =>
  * Returns null for anything not worth carrying: our own scripts, and the
  * anonymous `eval`/`new Function` scripts that have no URL to resolve against.
  */
-export function fromScriptParsed(p: any): ScriptEntry | null {
-  const url: string = p?.url ?? '';
-  if (!url || isOurs(url)) return null;
+export function fromScriptParsed(p: any, redactUrl: (url: string) => string): ScriptEntry | null {
+  const raw: string = p?.url ?? '';
+  // Filtered on the real URL — `isOurs` matches a scheme, and redaction is free
+  // to rewrite anything after it.
+  if (!raw || isOurs(raw)) return null;
 
-  const raw: string = p?.sourceMapURL ?? '';
+  // Redaction takes the same parameter here as everywhere else. A bundle served
+  // from a signed CDN carries its credential in the query string, and
+  // `//# sourceMappingURL=…?token=…` carries one too — so this is the same
+  // secret as an Authorization header, arriving by a different door.
+  // AGENTS.md, non-negotiables: the raw value never reaches disk.
+  const url = redactUrl(raw);
+  const map: string = p?.sourceMapURL ?? '';
   const entry: ScriptEntry = { scriptId: String(p.scriptId), url };
 
-  if (raw.startsWith('data:')) entry.inlineMap = true;
-  else if (raw) entry.sourceMapURL = raw;
+  if (map.startsWith('data:')) entry.inlineMap = true;
+  else if (map) entry.sourceMapURL = redactUrl(map);
 
   if (p?.hash) entry.hash = String(p.hash);
   if (p?.buildId) entry.buildId = String(p.buildId);

@@ -203,7 +203,7 @@ async function start(
   // Replayed for everything already loaded the moment Debugger.enable lands, so
   // this catches the bundle even though recording starts long after the page did.
   cdp.on('Debugger.scriptParsed', (p) => {
-    const entry = fromScriptParsed(p);
+    const entry = fromScriptParsed(p, (u) => ctx.redactor.url(u));
     if (entry && active) active.scripts.push(entry);
     else if (entry) beforeActiveScripts.push(entry);
   });

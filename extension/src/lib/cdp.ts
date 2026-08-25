@@ -80,9 +80,21 @@ export class CdpSession {
     // above, n=25, in a harness that is not itself a debugger on the page
     // (scripts/debugger-cost-cleanroom.mjs). Best-effort — a session without a
     // script index is still a complete session, which is not true of the others.
-    await this.send('Debugger.enable').catch((e) => {
-      console.warn('[bugcast] no script index this session', e);
-    });
+    //
+    // `setSkipAllPauses` is not optional here. Enabling the domain puts V8 in
+    // debug mode, so it starts honouring `debugger;` statements in the page —
+    // and a `debugger;` in a dev build or a devtools-detector library pauses the
+    // renderer, emits `Debugger.paused`, and waits for a front end that does not
+    // exist. Nothing here listens, nothing sends `Debugger.resume`, and the tab
+    // hangs until the user dismisses the infobar, which detaches us and ends the
+    // recording. A script index is not worth costing someone their session, so
+    // if the skip cannot be set the domain goes back off.
+    await this.send('Debugger.enable')
+      .then(() => this.send('Debugger.setSkipAllPauses', { skip: true }))
+      .catch(async (e) => {
+        console.warn('[bugcast] no script index this session', e);
+        await this.send('Debugger.disable').catch(() => {});
+      });
 
     // Service-worker traffic is invisible without this — the spike saw only the
     // document URL, not even /sw.js. Child targets then need their own
