@@ -32,7 +32,7 @@ import {
   type ModelTier,
   type TranscriptionEngine,
 } from './transcribe';
-import { hostedEngine, HOSTED_MODEL } from './hosted';
+import { selectEngine } from './hosted';
 import {
   CHUNK_MS,
   pickMimeType,
@@ -99,11 +99,8 @@ let apiKey = '';
  * next one continues; a failed pass at stop is recorded as `transcriptError`.
  */
 function engine(): TranscriptionEngine {
-  return apiKey ? hostedEngine(apiKey) : transformersEngine(tier);
+  return selectEngine(apiKey, tier);
 }
-
-/** Whatever the measurement line below should call the engine in use. */
-const engineLabel = (): string => (apiKey ? HOSTED_MODEL : tier);
 
 /**
  * Rolling live transcription.
@@ -175,8 +172,9 @@ async function transcribeLiveWindow(state: Live): Promise<void> {
     // transcribes this same buffer, from the beginning of the session.
     advance(state.pcm, to, cursor);
 
+    const active = engine();
     const segments = cleanSegments(
-      await engine().transcribe(window, (from / 16_000) * 1000),
+      await active.transcribe(window, (from / 16_000) * 1000),
     );
 
     // Measured, because "the live pass is slow" was a complaint nobody had a
@@ -187,7 +185,7 @@ async function transcribeLiveWindow(state: Live): Promise<void> {
     console.debug(
       `[bugcast] live window ${(from / 16_000).toFixed(0)}s–${(to / 16_000).toFixed(0)}s: ` +
         `${took}ms for ${covers}ms of audio (${(took / covers).toFixed(2)}x realtime, ` +
-        `${segments.length} segments, ${engineLabel()})${took > covers ? ' — LOSING GROUND' : ''}`,
+        `${segments.length} segments, ${active.name})${took > covers ? ' — LOSING GROUND' : ''}`,
     );
     if (segments.length) {
       appendSpeech(

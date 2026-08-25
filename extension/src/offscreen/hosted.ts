@@ -18,7 +18,7 @@
  */
 
 import type { Segment } from '../lib/srt';
-import { MIN_SAMPLES, type TranscriptionEngine } from './transcribe';
+import { MIN_SAMPLES, transformersEngine, type ModelTier, type TranscriptionEngine } from './transcribe';
 
 const ENDPOINT = 'https://api.openai.com/v1/audio/transcriptions';
 
@@ -164,6 +164,7 @@ export function hostedEngine(
   }
 
   return {
+    name: model,
     async transcribe(samples, t0Offset) {
       // Same floor as the local engine: no speech simply means no .srt.
       if (samples.length < MIN_SAMPLES) return [];
@@ -180,4 +181,20 @@ export function hostedEngine(
       return out;
     },
   };
+}
+
+/**
+ * Which engine a session runs on.
+ *
+ * A key means hosted; anything else means local. This is the whole opt-in, and
+ * it is a privacy boundary rather than a feature flag — inverting it would send
+ * audio off the machine for a user who never asked. `map.md` gave up a stated
+ * non-goal on the promise that this defaults to local, so it is tested.
+ *
+ * Trimmed, because a key field holding only whitespace is a user who pasted
+ * badly, not a user opting in — and treating it as a key would fail the request
+ * anyway, after the upload.
+ */
+export function selectEngine(apiKey: string, tier: ModelTier): TranscriptionEngine {
+  return apiKey.trim() ? hostedEngine(apiKey.trim()) : transformersEngine(tier);
 }

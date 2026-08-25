@@ -3,10 +3,22 @@ import {
   encodeWav,
   hostedEngine,
   segmentsFromResponse,
+  selectEngine,
   HOSTED_MODEL,
   MAX_CHUNK_SAMPLES,
   VOCABULARY_PROMPT,
 } from './hosted';
+
+/** Read a mono 16-bit WAV back out, so a round-trip can be asserted. */
+async function decodeWav(blob: Blob): Promise<{ rate: number; samples: Float32Array }> {
+  const view = new DataView(await blob.arrayBuffer());
+  const tag = (at: number) => String.fromCharCode(...[0, 1, 2, 3].map((i) => view.getUint8(at + i)));
+  expect(tag(0)).toBe('RIFF');
+  const bytes = view.getUint32(40, true);
+  const out = new Float32Array(bytes / 2);
+  for (let i = 0; i < out.length; i++) out[i] = view.getInt16(44 + i * 2, true) / 32767;
+  return { rate: view.getUint32(24, true), samples: out };
+}
 
 const ok = (json: unknown) =>
   ({ ok: true, status: 200, statusText: 'OK', json: async () => json }) as unknown as Response;
@@ -113,5 +125,82 @@ describe('hostedEngine', () => {
     await expect(engine.transcribe(new Float32Array(16_000), 0)).rejects.toThrow(
       /401 Unauthorized.*Incorrect API key/s,
     );
+  });
+});
+
+describe('encodeWav round-trip', () => {
+  it('survives a decode with the samples and rate intact', async () => {
+    // The header assertions above prove the fields are where a parser looks.
+    // This proves the bytes between them are the audio we were handed — the
+    // failure it catches is an endianness or stride slip, which a header-only
+    // test cannot see and which reaches Whisper as noise.
+    const input = Float32Array.from([0, 0.5, -0.5, 0.999, -0.999, 0.001]);
+    const { rate, samples } = await decodeWav(encodeWav(input));
+
+    expect(rate).toBe(16_000);
+    expect(samples).toHaveLength(input.length);
+    for (let i = 0; i < input.length; i++) {
+      // 16-bit quantisation is the only permitted loss.
+      expect(Math.abs(samples[i] - input[i])).toBeLessThan(1 / 32767 + 1e-9);
+    }
+  });
+
+  it('declares a length matching the bytes it actually wrote', async () => {
+    const blob = encodeWav(new Float32Array(1234));
+    const view = new DataView(await blob.arrayBuffer());
+    expect(view.getUint32(40, true)).toBe(1234 * 2);
+    expect(blob.size).toBe(44 + 1234 * 2);
+    expect(view.getUint32(4, true)).toBe(blob.size - 8); // RIFF counts all but its own 8
+  });
+});
+
+describe('chunking a session longer than the upload cap', () => {
+  it('covers the whole session with no gap or overlap between chunks', async () => {
+    // Three chunks, because two can pass while an off-by-one in the stride
+    // still lurks: the second chunk is the only one with a predecessor and a
+    // successor.
+    const sent: number[] = [];
+    const engine = hostedEngine('sk-test', {
+      fetchImpl: async (_u, init) => {
+        sent.push(((init?.body as FormData).get('file') as Blob).size);
+        return { ok: true, status: 200, statusText: 'OK', json: async () => ({ segments: [] }) } as unknown as Response;
+      },
+    });
+
+    const total = MAX_CHUNK_SAMPLES * 2 + 16_000 * 90;
+    await engine.transcribe(new Float32Array(total), 0);
+
+    expect(sent).toHaveLength(3);
+    // Every byte of audio reached exactly one request.
+    const audioBytes = sent.reduce((a, b) => a + (b - 44), 0);
+    expect(audioBytes).toBe(total * 2);
+  });
+
+  it('keeps every chunk under the 25MB limit that forced chunking', async () => {
+    const sizes: number[] = [];
+    const engine = hostedEngine('sk-test', {
+      fetchImpl: async (_u, init) => {
+        sizes.push(((init?.body as FormData).get('file') as Blob).size);
+        return { ok: true, status: 200, statusText: 'OK', json: async () => ({ segments: [] }) } as unknown as Response;
+      },
+    });
+    await engine.transcribe(new Float32Array(16_000 * 60 * 40), 0); // 40 minutes
+    expect(Math.max(...sizes)).toBeLessThan(25 * 1024 * 1024);
+  });
+});
+
+describe('selectEngine', () => {
+  // This is the opt-in, and it is a privacy boundary: inverting it uploads a
+  // user's narration when they never asked.
+  it('stays local when no key is configured', () => {
+    expect(selectEngine('', 'base.en').name).toBe('base.en');
+  });
+
+  it('stays local for a key of only whitespace', () => {
+    expect(selectEngine('   \n', 'small.en').name).toBe('small.en');
+  });
+
+  it('goes hosted when a key is configured', () => {
+    expect(selectEngine('sk-test', 'base.en').name).toBe(HOSTED_MODEL);
   });
 });
