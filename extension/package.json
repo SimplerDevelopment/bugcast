@@ -9,7 +9,8 @@
     "build": "node scripts/gen-icons.mjs && vite build && vite build -c vite.content.config.ts && vite build -c vite.offscreen.config.ts && vite build -c vite.worker.config.ts && node scripts/copy-ort.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "smoke": "bun run build && node scripts/smoke.mjs"
+    "smoke": "bun run build && node scripts/smoke.mjs",
+    "av-sync": "bun run build && node scripts/av-sync.mjs"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
