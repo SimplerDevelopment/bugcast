@@ -91,12 +91,27 @@ replaces. Options, none taken yet:
 - **`frames: {enabled: false}` again**, two sessions running. #27 added a
   `console.warn` naming the reason (`[bugcast] no frames extracted`). Nobody has
   read it. The offscreen console has the answer in one line.
-- **`scripts: {enabled: false}`, and this looks like a regression I introduced.**
-  Sessions before #27 indexed scripts (`scripts.json`, 5.6KB); both sessions
-  after it report zero. #27 added a fallback that calls `Debugger.disable()` when
-  `Debugger.setSkipAllPauses` fails — if that call is failing, it is switching
-  the script index off entirely. **Suspect first.** `cdp.ts`, around the
-  `Debugger.enable` chain.
+- ~~**`scripts: {enabled: false}`**~~ — **found, fixed in #32.** The first
+  diagnosis here was wrong and is worth keeping as a warning. It blamed #27's
+  `Debugger.disable()` fallback; that fallback only runs when
+  `setSkipAllPauses` rejects, and it was not running. #27 changed nothing about
+  ordering.
+
+  The real cause: `Debugger.scriptParsed` replays every already-loaded script
+  in **one burst, the instant the domain is enabled** — inside `attach()`. The
+  handler was registered sixty lines later, after `await startCapture()` went
+  off to negotiate `tabCapture`. Unlike network and console traffic, which
+  keeps arriving, a one-shot burst missed is missed entirely.
+
+  Why `scripts/smoke.mjs` passes while asserting `scripts.length`: it is a
+  race, not a certainty. Five scripts and no video, and the continuation wins.
+  A real page with `tabCapture` in the way, and it never does. Network capture
+  in the same broken session worked perfectly, which is the tell.
+
+  **Generalise this.** "Regression, and the last change to that file is mine"
+  is a seductive shape and it was wrong here. The `enabled: false` came from an
+  empty array, not from a disabled domain — reading which of the two it was
+  would have cost one grep.
 - **The hosted OpenAI path has never made a real request.** `hosted.test.ts`
   injects a fake `fetch`. The CORS/host-permission reasoning in #28 is reasoned,
   not observed.
