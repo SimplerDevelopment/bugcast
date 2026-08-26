@@ -119,5 +119,57 @@
     });
   }
 
+  /**
+   * Bursts of sound, emitted by the page at moments the page can name.
+   *
+   * The obvious source was Chrome's fake microphone. It cannot be used: the
+   * --use-file-for-fake-audio-capture flag forces a fake audio device, and
+   * tabCapture resolves its own audio through the same path, so recording
+   * refuses to start at all with "Requested device not found". Measured, twice.
+   *
+   * Emitting from the page is better anyway. The burst is scheduled against
+   * the same clock that paints the counter, so the sound and the picture share
+   * a reference rather than being compared through an assumed one — and no
+   * flags are involved that could break the thing under test.
+   *
+   * Voiced harmonics rather than a pure tone, so the signal survives whatever
+   * processing sits between here and the file.
+   */
+  let audio = null;
+  const startAudio = () => {
+    if (audio) return;
+    audio = new (window.AudioContext || window.webkitAudioContext)();
+  };
+  // Autoplay policy: a context created without a gesture starts suspended, so
+  // take the first click as permission and ask for it up front as well.
+  document.addEventListener('pointerdown', () => { startAudio(); audio?.resume(); }, { once: true });
+  startAudio();
+
+  let bursts = 0;
+  setInterval(() => {
+    if (!audio || audio.state !== 'running') return;
+    const t = tickNow();
+    const at = audio.currentTime;
+    const gain = audio.createGain();
+    gain.connect(audio.destination);
+    // 10ms raised-cosine edges: a hard start is a click, and a click is
+    // broadband — the first thing any suppressor throws away.
+    gain.gain.setValueAtTime(0.0001, at);
+    gain.gain.exponentialRampToValueAtTime(0.2, at + 0.01);
+    gain.gain.setValueAtTime(0.2, at + 0.29);
+    gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.3);
+    for (const [hz, level] of [[130, 1], [260, 0.6], [390, 0.4], [520, 0.25]]) {
+      const osc = audio.createOscillator();
+      osc.frequency.value = hz;
+      const g = audio.createGain();
+      g.gain.value = level / 2.25;
+      osc.connect(g).connect(gain);
+      osc.start(at);
+      osc.stop(at + 0.31);
+    }
+    bursts++;
+    console.error('AVSYNC audio seq=' + bursts + ' tick=' + t);
+  }, 2000);
+
   window.__tc = { TICK_MS, BITS, tickNow, startedAt: start };
 </script>

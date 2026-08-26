@@ -34,6 +34,7 @@
 
 import http from 'node:http';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
@@ -41,7 +42,16 @@ import { launchWithExtension, makeGrantActiveTab } from './harness.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WANT_SPEECH = process.argv.includes('--speech');
-const SECONDS = Number(process.env.AV_SYNC_SECONDS ?? 40);
+/**
+ * Long enough to always have something to measure.
+ *
+ * tabCapture delivery here ranges from 0.2 to 2.2 frames a second between runs
+ * with identical settings, so a 40-second session collected 63 frames once and
+ * 9 the next time — below the minimum, failing for no reason but luck. Ninety
+ * seconds clears the bar at the bottom of that range, and lengthens the arm the
+ * drift fit is measured over, which is the number that most wants a long one.
+ */
+const SECONDS = Number(process.env.AV_SYNC_SECONDS ?? 90);
 
 /**
  * Bit centres as a fraction of the PAGE's width, matching the fixture's `.bit`
@@ -80,6 +90,57 @@ await new Promise((r) => server.listen(0, r));
 PORT = server.address().port;
 const PAGE = `http://localhost:${PORT}/`;
 
+/** Bursts every this often in the fake-microphone signal. */
+const BURST_EVERY_MS = 2000;
+const BURST_MS = 300;
+const AUDIO_RATE = 48000;
+
+/**
+ * A microphone signal whose timing is known exactly.
+ *
+ * NOT a pure tone, which is the obvious choice and the wrong one: the mic is
+ * opened with noiseSuppression and autoGainControl on (offscreen/main.ts), and
+ * a suppressor tuned to keep speech will happily gate a steady sine as noise.
+ * These bursts are a harmonic stack at a voice-like fundamental, which the same
+ * processing is built to preserve. Raised-cosine edges because a hard start is
+ * a click, and a click is broadband — exactly what gets suppressed.
+ *
+ * Synthesised rather than spoken so it needs no TTS, no platform, and no
+ * checked-in blob. Words are a separate question; this one is only "did the
+ * sound arrive when it should have".
+ */
+function writeBurstWav(file, totalMs) {
+  const samples = Math.ceil((totalMs / 1000) * AUDIO_RATE);
+  const pcm = new Int16Array(samples);
+  const burstLen = Math.floor((BURST_MS / 1000) * AUDIO_RATE);
+  const fade = Math.floor(0.01 * AUDIO_RATE);
+  for (let at = BURST_EVERY_MS; at < totalMs; at += BURST_EVERY_MS) {
+    const start = Math.floor((at / 1000) * AUDIO_RATE);
+    for (let i = 0; i < burstLen && start + i < samples; i++) {
+      const t = i / AUDIO_RATE;
+      let v = 0;
+      // A fundamental plus three harmonics, rolled off — voiced, not tonal.
+      for (const [h, gain] of [[130, 1], [260, 0.6], [390, 0.4], [520, 0.25]]) {
+        v += gain * Math.sin(2 * Math.PI * h * t);
+      }
+      v /= 2.25;
+      const env = Math.min(1, i / fade, (burstLen - i) / fade);
+      pcm[start + i] = Math.max(-32768, Math.min(32767, Math.round(v * env * 22000)));
+    }
+  }
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0); header.writeUInt32LE(36 + pcm.length * 2, 4); header.write('WAVE', 8);
+  header.write('fmt ', 12); header.writeUInt32LE(16, 16); header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(1, 22); header.writeUInt32LE(AUDIO_RATE, 24);
+  header.writeUInt32LE(AUDIO_RATE * 2, 28); header.writeUInt16LE(2, 32); header.writeUInt16LE(16, 34);
+  header.write('data', 36); header.writeUInt32LE(pcm.length * 2, 40);
+  fs.writeFileSync(file, Buffer.concat([header, Buffer.from(pcm.buffer)]));
+  return Math.floor((totalMs - BURST_EVERY_MS) / BURST_EVERY_MS) + 1;
+}
+
+const burstWav = path.join(os.tmpdir(), 'av-sync-bursts.wav');
+const burstCount = writeBurstWav(burstWav, (SECONDS + 5) * 1000);
+
 const speechFixture = path.join(HERE, 'fixtures', 'narration.wav');
 const speechScript = path.join(HERE, 'fixtures', 'narration.json');
 const haveSpeech = fs.existsSync(speechFixture) && fs.existsSync(speechScript);
@@ -96,28 +157,34 @@ if (WANT_SPEECH && !haveSpeech) {
 // flags that keep the renderer running when the window is occluded or the
 // operator is doing something else on the desktop. Measured: the same 30-second
 // run produced 814KB with the window in front and 22KB behind it.
+// `%noloop` matters: without it the clip repeats, and every burst — or every
+// expected utterance — matches more than once, at which point neither the
+// spacing fit nor the ordering assertion means anything.
+/**
+ * No fake-microphone flags, and that is a finding rather than an omission.
+ *
+ * --use-file-for-fake-audio-capture forces a fake audio device, and tabCapture
+ * resolves its own audio through the same path: with it set, recording refuses
+ * to start at all — "Requested device not found". Measured twice, with and
+ * without --use-fake-device-for-media-capture alongside it.
+ *
+ * So the microphone path cannot be driven automatically in this browser, and
+ * the audio check below uses tab audio the page emits itself. What that covers
+ * and what it does not is spelled out where it runs.
+ */
 const extraArgs = [
+  // The page makes its own sound and there is no user gesture before recording
+  // starts, so a suspended AudioContext would silently produce no bursts.
+  '--autoplay-policy=no-user-gesture-required',
   '--disable-backgrounding-occluded-windows',
   '--disable-renderer-backgrounding',
   '--disable-background-timer-throttling',
-  // The capture surface, not the window, is what matters here. On a Retina
-  // display the tab records at device scale — 2880x1800 — and software VP8 at
-  // that size cannot keep up, so tabCapture delivers a handful of frames for a
-  // whole session. Pinning the scale factor to 1 and the window small takes the
-  // encoder's job from ~5.2 megapixels a frame to ~0.5.
+  // A fixed, modest surface, so runs are comparable between machines and a
+  // Retina display does not silently record at 2880x1800. Whether this helps
+  // the frame rate is genuinely unclear — see the note by the viewport below.
   '--force-device-scale-factor=1',
   '--window-size=1000,700',
 ];
-if (WANT_SPEECH) {
-  // Chrome's fake device replaces the microphone with a file. `%noloop` matters:
-  // without it the clip repeats and every expected utterance matches twice, at
-  // which point the ordering assertion is meaningless.
-  extraArgs.push(
-    '--use-fake-device-for-media-capture',
-    '--use-fake-ui-for-media-stream',
-    `--use-file-for-fake-audio-capture=${speechFixture}%noloop`,
-  );
-}
 
 /**
  * Make the browser the frontmost APPLICATION, not just the frontmost tab.
@@ -154,11 +221,24 @@ const grantActiveTab = makeGrantActiveTab({ extId, cdpPort });
 console.log('extension id:', extId);
 
 const target = await ctx.newPage();
-// A fixed viewport, so a run on one machine is comparable to a run on another.
-// It also means the page does not fill the recorded frame — the video is the
-// window's content area, the layout is this — which is why the decoder locates
-// the page rather than assuming the two rectangles are the same.
-await target.setViewportSize({ width: 960, height: 600 });
+/**
+ * No viewport emulation: the page fills the window, so the recorded surface
+ * and the layout are the same shape and the decoder's job is as simple as it
+ * can be. (It still locates the page, because the surface is scaled by the
+ * device pixel ratio regardless.)
+ *
+ * Resist the urge to tune this for frame count. tabCapture delivery in this
+ * environment is wildly variable — two runs with byte-identical configuration
+ * produced 63 and 33 frames — and every plausible lever tested against it
+ * (window size, page size, device scale, occlusion flags, app activation)
+ * moved the result by less than that noise. Anything you conclude from a
+ * single run here will be wrong; it took five wrong diagnoses to learn that.
+ *
+ * It does not matter much, and that is the useful finding: the sync numbers
+ * are stable across a fivefold swing in frame count. 63 frames gave a clock
+ * ratio of 1.00000, 13 frames gave 1.00029. The measurement does not depend on
+ * the thing that will not sit still.
+ */
 await target.goto(PAGE);
 const tabId = await sw.evaluate(async () => {
   const [t] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -239,14 +319,33 @@ const artifacts = await ext.evaluate(async (id) => {
     names.push(`${name}${handle.kind === 'file' ? ` (${(await handle.getFile()).size} bytes)` : '/'}`);
   }
   const videoHandle = await folder.getFileHandle('video.webm').catch(() => null);
+  // Copied out so the file can be examined with tools that are not this
+  // harness. When the decoder and the recording disagree about how long the
+  // video is, believing the decoder is how you end up debugging the wrong one.
+  let videoBase64 = null;
+  if (videoHandle) {
+    const buf = new Uint8Array(await (await videoHandle.getFile()).arrayBuffer());
+    let bin = '';
+    for (let i = 0; i < buf.length; i += 0x8000) {
+      bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+    }
+    videoBase64 = btoa(bin);
+  }
   return {
     names,
+    videoBase64,
     videoBytes: videoHandle ? (await videoHandle.getFile()).size : 0,
     timeline: await read('timeline.json'),
     speech: await read('speech.ndjson'),
     srt: await read('transcript.srt'),
   };
 }, sessionId);
+
+if (artifacts.videoBase64) {
+  const copy = path.join(os.tmpdir(), `av-sync-${sessionId}.webm`);
+  fs.writeFileSync(copy, Buffer.from(artifacts.videoBase64, 'base64'));
+  console.log(`video copied to ${copy}`);
+}
 
 console.log('\n=== written ===');
 console.log(artifacts.names.map((n) => '  ' + n).join('\n'));
@@ -576,7 +675,19 @@ if (Math.abs(driftOverSession) > resolution) {
 const lastEvent = Math.max(...events.map((e) => e.t ?? 0));
 const shortfall = lastEvent - covered.to;
 console.log(`  video span       ${(covered.to / 1000).toFixed(1)}s vs ${(lastEvent / 1000).toFixed(1)}s of timeline`);
-if (shortfall > Math.max(3000, medianGap * 3)) {
+/**
+ * Only assert this when the capture was healthy enough for it to mean
+ * something. Below a few frames a second, "the recording stopped early" and
+ * "the next frame simply never came" are the same observation, and failing on
+ * it would make the harness red for a reason it cannot substantiate — the same
+ * mistake as asserting a 300ms tolerance on a run that could resolve 500.
+ */
+const canJudgeSpan = fps >= 5;
+if (!canJudgeSpan && shortfall > 3000) {
+  console.log(`  NOTE: the video ends ${(shortfall / 1000).toFixed(1)}s early, but at ${fps.toFixed(1)}fps that`);
+  console.log('  cannot be told apart from the next frame never arriving. Not asserted.');
+}
+if (canJudgeSpan && shortfall > Math.max(3000, medianGap * 3)) {
   console.error(`\nFAIL: the video stops ${(shortfall / 1000).toFixed(1)}s before the session does.`);
   console.error('  Events kept arriving after the last frame, so this is the recording ending');
   console.error('  early rather than the page going quiet.');
@@ -585,6 +696,181 @@ if (shortfall > Math.max(3000, medianGap * 3)) {
 
 if (!failed) {
   console.log('\n  the timeline, the video and the page agree.');
+}
+
+// -------------------------------------------------------------------- audio
+//
+// Does the sound in the recording line up with the picture in the recording?
+//
+// The page emits a burst every two seconds and logs the tick it emitted it at,
+// so each burst has a known position on the same clock the counter is painted
+// from. Finding the burst in the recorded audio track and asking the video's
+// own clock what time that was gives a direct answer, with no shared reference
+// assumed and no recogniser involved.
+//
+// WHAT THIS DOES NOT COVER: the microphone. Narration reaches the recording
+// through getUserMedia, and Chrome's fake-audio-file flag — the only way to
+// drive a microphone unattended — cannot be used here because it breaks
+// tabCapture (see extraArgs). Tab audio and mic audio are mixed into the same
+// sink by the same AudioContext (offscreen/main.ts), so the timeline this
+// measures is the one narration also lands on; what is untested is the mic
+// branch's own latency. The word-level stage behind --speech remains the only
+// thing that touches it, and it needs a real microphone.
+
+const ENVELOPE_MS = 10;
+const audio = await ext.evaluate(
+  async ({ id, frameMs }) => {
+    const opfs = await navigator.storage.getDirectory();
+    const dir = await opfs.getDirectoryHandle('sessions');
+    const folder = await dir.getDirectoryHandle(id);
+    const bytes = await (await (await folder.getFileHandle('video.webm')).getFile()).arrayBuffer();
+    const ctx = new AudioContext();
+    let buf;
+    try {
+      buf = await ctx.decodeAudioData(bytes);
+    } catch (e) {
+      await ctx.close();
+      return { error: String(e?.message ?? e) };
+    }
+    const data = buf.getChannelData(0);
+    const step = Math.max(1, Math.round((frameMs / 1000) * buf.sampleRate));
+    // An RMS envelope rather than raw samples: 40 seconds of audio is millions
+    // of floats, and onset timing needs none of that resolution.
+    const envelope = [];
+    for (let i = 0; i + step <= data.length; i += step) {
+      let sum = 0;
+      for (let j = 0; j < step; j++) sum += data[i + j] * data[i + j];
+      envelope.push(Math.sqrt(sum / step));
+    }
+    await ctx.close();
+    return { envelope, sampleRate: buf.sampleRate, durationMs: buf.duration * 1000, channels: buf.numberOfChannels };
+  },
+  { id: sessionId, frameMs: ENVELOPE_MS },
+);
+
+console.log('\n=== narration vs video ===');
+if (audio?.error) {
+  console.error(`  could not decode the audio track: ${audio.error}`);
+  failed = true;
+} else if (!audio?.envelope?.length) {
+  console.error('  the recording has no audio track at all.');
+  failed = true;
+} else {
+  const env = audio.envelope;
+  const peak = Math.max(...env);
+  console.log(`  audio track ${(audio.durationMs / 1000).toFixed(1)}s, ${audio.channels}ch @ ${audio.sampleRate}Hz, peak ${peak.toFixed(4)}`);
+
+  if (peak < 0.005) {
+    console.error('  the audio track is effectively silent — the fake microphone never reached the recording.');
+    failed = true;
+  } else {
+    // A rising edge above a fraction of peak, with a hold-off so one burst
+    // cannot register twice. Absolute thresholds are hopeless here: the mic is
+    // opened with automatic gain control, so the level is whatever Chrome
+    // decided it should be.
+    const threshold = peak * 0.25;
+    const holdOff = Math.floor(1000 / ENVELOPE_MS);
+    const onsets = [];
+    let last = -Infinity;
+    for (let i = 1; i < env.length; i++) {
+      if (env[i] >= threshold && env[i - 1] < threshold && i - last > holdOff) {
+        onsets.push(i * ENVELOPE_MS);
+        last = i;
+      }
+    }
+    const emitted = [];
+    for (const e of events) {
+      const m = /AVSYNC audio seq=(\d+) tick=(\d+)/.exec(JSON.stringify(e));
+      if (m) emitted.push({ seq: Number(m[1]), pageMs: Number(m[2]) * TICK_MS, t: e.t });
+    }
+    console.log(`  ${onsets.length} bursts heard, ${emitted.length} emitted by the page`);
+
+    if (onsets.length < 4) {
+      console.error('  too few bursts to fit a clock against.');
+      failed = true;
+    } else if (emitted.length >= 4) {
+      /**
+       * Each heard burst is matched to the emission nearest it in the video's
+       * own clock, then the residual is how far the sound sat from the moment
+       * the page says it made it. Matching by order would be tidier and wrong:
+       * a missed onset would shift every pairing after it and turn one dropped
+       * burst into a whole session of apparent desync.
+       */
+      const pairs = [];
+      for (const onset of onsets) {
+        const heardPageMs = predict(onset);
+        let best = null, bestD = Infinity;
+        for (const e of emitted) {
+          const d = Math.abs(e.pageMs - heardPageMs);
+          if (d < bestD) { bestD = d; best = e; }
+        }
+        if (best && bestD < BURST_EVERY_MS / 2) pairs.push({ onset, heardPageMs, emitted: best, delta: heardPageMs - best.pageMs });
+      }
+      console.log(`  ${pairs.length} bursts matched to an emission`);
+      if (pairs.length < 4) {
+        console.error('  too few bursts could be matched to what the page says it emitted.');
+        failed = true;
+      } else {
+        const deltas = pairs.map((p) => p.delta);
+        const med = [...deltas].sort((a, b) => a - b)[Math.floor(deltas.length / 2)];
+        const spread = Math.max(...deltas.map((d) => Math.abs(d - med)));
+        const firstHalf = deltas.slice(0, Math.ceil(deltas.length / 2));
+        const lastHalf = deltas.slice(-Math.ceil(deltas.length / 2));
+        const aDrift = lastHalf.reduce((a, b) => a + b, 0) / lastHalf.length -
+                       firstHalf.reduce((a, b) => a + b, 0) / firstHalf.length;
+        // Half a burst plus the envelope resolution: below that the onset
+        // detector is the thing being measured, not the recording.
+        const tol = Math.max(150, BURST_MS / 2 + ENVELOPE_MS * 2);
+        console.log(`  audio vs video   ${med > 0 ? '+' : ''}${med.toFixed(0)}ms constant offset, ${spread.toFixed(0)}ms spread (tolerance ±${tol})`);
+        console.log(`  audio drift      ${aDrift > 0 ? '+' : ''}${aDrift.toFixed(0)}ms across the session`);
+        if (spread > tol) {
+          console.error(`\nFAIL: sound and picture disagree by up to ${spread.toFixed(0)}ms.`);
+          failed = true;
+        }
+        if (Math.abs(aDrift) > tol) {
+          console.error(`\nFAIL: the audio drifts ${aDrift.toFixed(0)}ms against the video across the session.`);
+          failed = true;
+        }
+      }
+    } else {
+      // The source spacing is exact by construction, so fitting detected onset
+      // against burst index measures how fast the recorded audio clock runs.
+      // A slope that is not the source spacing means the audio was stretched
+      // or resampled relative to the video it is stored beside.
+      const k = onsets.map((_, i) => i);
+      const meanK = k.reduce((a, b) => a + b, 0) / k.length;
+      const meanT = onsets.reduce((a, b) => a + b, 0) / onsets.length;
+      let num = 0, den = 0;
+      for (let i = 0; i < onsets.length; i++) {
+        num += (k[i] - meanK) * (onsets[i] - meanT);
+        den += (k[i] - meanK) ** 2;
+      }
+      const spacing = num / den;
+      const firstAt = meanT - spacing * meanK;
+      const scatter = Math.max(...onsets.map((t, i) => Math.abs(t - (firstAt + spacing * i))));
+      // Fallback: no emission beacons reached the timeline, so all that can be
+      // checked is that the spacing the page used survived the recording.
+      const spacingError = spacing - BURST_EVERY_MS;
+      const audioDrift = spacingError * (onsets.length - 1);
+
+      console.log(`  burst spacing    ${spacing.toFixed(1)}ms (source ${BURST_EVERY_MS}ms, error ${spacingError > 0 ? '+' : ''}${spacingError.toFixed(1)}ms)`);
+      console.log(`  audio drift      ${audioDrift > 0 ? '+' : ''}${audioDrift.toFixed(0)}ms across ${onsets.length} bursts`);
+      console.log(`  onset scatter    ${scatter.toFixed(0)}ms`);
+      console.log(`  first burst at   ${firstAt.toFixed(0)}ms of media time (source has it at ${BURST_EVERY_MS}ms)`);
+
+      // Half a burst length: below that the onset detector's own resolution
+      // dominates, and asserting tighter would be asserting noise again.
+      const audioTolerance = Math.max(100, BURST_MS / 2);
+      if (Math.abs(audioDrift) > audioTolerance) {
+        console.error(`\nFAIL: the narration drifts ${audioDrift.toFixed(0)}ms against the video it is stored with.`);
+        failed = true;
+      }
+      if (scatter > audioTolerance * 2) {
+        console.error(`\nFAIL: burst timing scatters by ${scatter.toFixed(0)}ms; the audio timeline is not stable.`);
+        failed = true;
+      }
+    }
+  }
 }
 
 // ------------------------------------------------------------------- speech
