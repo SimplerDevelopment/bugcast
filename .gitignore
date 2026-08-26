@@ -7,3 +7,6 @@ dist/
 *.webm
 *.png
 starts.json
+
+# Operator notes — internal board ids, not useful to anyone cloning this.
+CLAUDE.md
