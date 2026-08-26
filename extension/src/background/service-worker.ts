@@ -168,6 +168,23 @@ async function start(
   if (!tab?.id) return { error: 'No active tab to record.' };
 
   const cdp = new CdpSession();
+  const redactor = new DefaultRedactor();
+  /**
+   * scriptParsed replays every already-loaded script the instant
+   * `Debugger.enable` lands — inside `attach`. It is a one-shot burst, unlike
+   * network and console traffic, which keeps arriving; so a handler registered
+   * after `attach` returns does not merely miss a moment of it, it misses all
+   * of it and the index comes out empty. That is why this sits here and not
+   * beside the other captures below, and why `active` cannot be closed over
+   * directly: it does not exist yet either.
+   */
+  const beforeActiveScripts: ScriptEntry[] = [];
+  cdp.on('Debugger.scriptParsed', (p) => {
+    const entry = fromScriptParsed(p, (u) => redactor.url(u));
+    if (!entry) return;
+    if (active) active.scripts.push(entry);
+    else beforeActiveScripts.push(entry);
+  });
   try {
     await cdp.attach(tab.id);
   } catch (e) {
@@ -188,9 +205,6 @@ async function start(
    * session, which the disk smoke caught by comparing counts.
    */
   const beforeActive: string[] = [];
-  // scriptParsed replays the instant the domain is enabled, which is before
-  // `active` exists — the same hand-over the event stream already needs.
-  const beforeActiveScripts: ScriptEntry[] = [];
   const record = (event: TimelineEvent): void => {
     events.push(event);
     if (active) queueLine(JSON.stringify(event));
@@ -214,7 +228,6 @@ async function start(
         console.warn('[bugcast] capture unavailable', e);
         return null;
       });
-  const redactor = new DefaultRedactor();
   const ctx: CaptureContext = {
     // Sampled inside MediaRecorder.start(), so every source in the artifact
     // shares one origin with the video. Falls back to wall-clock only when
@@ -233,13 +246,6 @@ async function start(
   new NetworkCapture(cdp, ctx).start();
   new PageCapture(cdp, ctx).start();
 
-  // Replayed for everything already loaded the moment Debugger.enable lands, so
-  // this catches the bundle even though recording starts long after the page did.
-  cdp.on('Debugger.scriptParsed', (p) => {
-    const entry = fromScriptParsed(p, (u) => ctx.redactor.url(u));
-    if (entry && active) active.scripts.push(entry);
-    else if (entry) beforeActiveScripts.push(entry);
-  });
   await injectInteractionCapture(tab.id);
 
   // Recording almost always starts on an already-loaded page, so
