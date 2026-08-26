@@ -10,3 +10,10 @@ starts.json
 
 # Operator notes — internal board ids, not useful to anyone cloning this.
 CLAUDE.md
+
+# Generated fake-mic fixture — see extension/scripts/make-narration.mjs.
+# Regenerate rather than commit: it is ~1.3MB of synthesised speech whose only
+# property that matters is the words and their offsets, and a checked-in blob
+# drifts from the script beside it without anyone noticing.
+extension/scripts/fixtures/narration.wav
+extension/scripts/fixtures/narration.json
