@@ -108,6 +108,13 @@ replaces. Options, none taken yet:
   A real page with `tabCapture` in the way, and it never does. Network capture
   in the same broken session worked perfectly, which is the tell.
 
+  The premise was unfounded too. "Sessions before #27 indexed scripts
+  (`scripts.json`, 5.6KB)" — no real session ever did. The only recordings
+  older than the fix are from 2026-08-20, and the feature landed on the 21st;
+  their `session.json` has no `scripts` key at all. The 5.6KB index came from a
+  smoke run, which is precisely the environment that wins the race. So this was
+  never a regression: the script index had not once worked in a real recording.
+
   **Generalise this.** "Regression, and the last change to that file is mine"
   is a seductive shape and it was wrong here. The `enabled: false` came from an
   empty array, not from a disabled domain — reading which of the two it was
