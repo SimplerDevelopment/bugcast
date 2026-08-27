@@ -425,6 +425,7 @@ async function stop(): Promise<Response> {
   let writeError: string | null = null;
   let report = '';
   let segments: Segment[] = [];
+  let transcriptState: 'pending' | 'failed' | null = 'pending';
 
   /**
    * Everything the session is, written out.
@@ -443,7 +444,7 @@ async function stop(): Promise<Response> {
   const persist = async (): Promise<void> => {
     try {
       report = renderSessionReport(id, title, startedAt, startUrl, events, redaction);
-      const files = sessionFiles(id, startedAt, startUrl, events, redaction, report, videoOnDisk, segments, frames.written, { narration: wantsNarration, frames: wantsFrames }, app, dedupe(scripts));
+      const files = sessionFiles(id, startedAt, startUrl, events, redaction, report, videoOnDisk, segments, frames.written, { narration: wantsNarration, frames: wantsFrames, transcript: transcriptState }, app, dedupe(scripts));
       if (hasFolder) {
         try {
           written = await writeSession(id, files);
@@ -480,14 +481,17 @@ async function stop(): Promise<Response> {
       | { segments?: Segment[]; transcriptError?: string | null }
       | null;
     segments = pass?.segments ?? [];
+    transcriptState = segments.length ? null : pass?.transcriptError ? 'failed' : null;
     if (pass?.transcriptError) {
       console.warn('[bugcast] transcription failed', pass.transcriptError);
       await chrome.storage.local.set({ liveError: `Transcription failed: ${pass.transcriptError}` });
     }
     mergeSpeech(segments);
     await buildFrames();
-    // Only worth rewriting if the second pass actually added something.
-    if (segments.length || frames.written) await persist();
+    // Always rewritten, even when the pass produced nothing: the first write
+    // said `pending`, and leaving that behind would claim a transcript is still
+    // coming when it never is.
+    await persist();
   } catch (e) {
     // The session is already on disk. An enrichment failure leaves it exactly
     // as complete as it was a moment ago, which is the whole point of the split.
@@ -573,7 +577,20 @@ function sessionFiles(
    * artifact has to distinguish them — otherwise the same misreading is not
    * just possible but correct half the time.
    */
-  wanted: { narration: boolean; frames: boolean },
+  wanted: {
+    narration: boolean;
+    frames: boolean;
+    /**
+     * Why there is no transcript, when there is none.
+     *
+     * `pending` is the honest answer between the two writes — the session is on
+     * disk and the pass has not run yet. `failed` is what an engine that threw
+     * leaves behind. Without these, a missing transcript is indistinguishable
+     * from one that was never asked for, which is the exact ambiguity that sent
+     * BC-001 to the wrong module.
+     */
+    transcript?: 'pending' | 'failed' | null;
+  },
   /** What the page contributed via `bugcast:session`. Absent when it said nothing. */
   app: Record<string, unknown> | null,
   /** One entry per script URL, for resolving a minified frame at read time. */
@@ -612,7 +629,14 @@ function sessionFiles(
             : { enabled: false },
           transcript: segments.length
             ? { enabled: true, file: 'transcript.srt', segments: segments.length }
-            : { enabled: false, ...(wanted.narration ? {} : { reason: 'turned off' }) },
+            : {
+                enabled: false,
+                ...(!wanted.narration
+                  ? { reason: 'turned off' }
+                  : wanted.transcript
+                    ? { reason: wanted.transcript }
+                    : {}),
+              },
           frames: frameCount
             ? { enabled: true, dir: 'frames/', count: frameCount, longEdge: 1280 }
             : { enabled: false, ...(wanted.frames ? {} : { reason: 'turned off' }) },

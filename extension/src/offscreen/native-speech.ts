@@ -38,7 +38,16 @@ export interface NativeLine {
 }
 
 export interface NativeSpeechSession {
-  stop(): void;
+  /**
+   * Resolves once the engine has handed back everything it was still hearing.
+   *
+   * Awaitable on purpose. `recognition.stop()` does not discard the utterance
+   * in flight — it finalises it and delivers it a moment later — so a caller
+   * that fires and moves on loses the last thing that was said. That is
+   * precisely what happened: the closing sentence of a session never reached
+   * speech.ndjson because the write chain had already been awaited.
+   */
+  stop(): Promise<void>;
 }
 
 type Ctor = any;
@@ -68,6 +77,8 @@ export function speechCtor(scope: any = globalThis): Ctor | null {
  * "not available" and the right one.
  */
 const STATUS_TIMEOUT_MS = 1_500;
+/** How long to wait for the engine's last words after asking it to stop. */
+const FINAL_RESULT_TIMEOUT_MS = 3_000;
 
 export async function nativeSpeechStatus(
   lang = 'en-US',
@@ -176,11 +187,26 @@ export function startNativeSpeech(
   return {
     stop() {
       stopped = true;
-      try {
-        recognition.stop();
-      } catch {
-        // Already ended; nothing to stop.
-      }
+      return new Promise<void>((resolve) => {
+        // Bounded, because a stuck engine must not hold up the session write.
+        // Losing the last phrase is bad; losing the recording waiting for it
+        // would be worse.
+        const done = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(done, FINAL_RESULT_TIMEOUT_MS);
+        // Replaces the restart handler, which is inert now that `stopped` is
+        // set. `onend` fires after the last result has been delivered, which is
+        // the signal being waited for.
+        recognition.onend = done;
+        try {
+          recognition.stop();
+        } catch {
+          // Already ended; nothing left to wait for.
+          done();
+        }
+      });
     },
   };
 }

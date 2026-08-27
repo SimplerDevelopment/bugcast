@@ -487,7 +487,11 @@ async function stop(): Promise<unknown> {
   if (!state) return { ok: true };
 
   clearInterval(state.liveTimer);
-  state.native?.stop();
+  // Awaited, and awaited BEFORE the write chain. The engine finalises the
+  // utterance it was mid-way through and delivers it a moment after being
+  // asked to stop, so firing and moving on drops the last thing said — which
+  // is usually the sentence explaining what just went wrong.
+  await state.native?.stop();
   await speechWrites;
   await new Promise<void>((resolve) => {
     state.recorder.onstop = () => resolve();
