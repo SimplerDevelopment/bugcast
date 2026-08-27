@@ -54,6 +54,7 @@ import {
   OFFSCREEN_ZIP,
   OFFSCREEN_STARTED,
   OFFSCREEN_STOP,
+  OFFSCREEN_TRANSCRIBE,
 } from '../background/messages';
 
 interface Live {
@@ -161,6 +162,9 @@ const LIVE_WINDOW_SAMPLES = 16_000 * 30;
 /** Samples already sent to the live pass, counted from the start of the session. */
 let liveOffset = 0;
 let liveBusy = false;
+
+/** Held between stop() and the transcription pass that follows it. */
+let pendingSamples: Float32Array | null = null;
 
 /** `MediaRecorder.start()`, in epoch ms. The clock every `t` is measured from. */
 let t0 = 0;
@@ -288,6 +292,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   const handlers: Record<string, () => Promise<unknown>> = {
     [OFFSCREEN_START]: () => start(msg),
     [OFFSCREEN_STOP]: () => stop(),
+    [OFFSCREEN_TRANSCRIBE]: () => transcribeFinal(),
     [OFFSCREEN_FLUSH_VIDEO]: () => flushVideo(msg.sessionId),
     [OFFSCREEN_FRAMES]: () => frames(msg),
     [OFFSCREEN_SELF_TEST]: () => selfTest(msg.check, msg.tier ?? DEFAULT_TIER),
@@ -496,7 +501,8 @@ async function stop(): Promise<unknown> {
   await state.writes.catch((e) => console.error('[bugcast] chunk write failed', e));
   await state.writable?.close();
 
-  // One flat buffer for the transcription engine (#6).
+  // One flat buffer for the transcription engine (#6), kept for the separate
+  // pass that follows.
   //
   // The whole session, from t0 — which is why the live pass moves a cursor
   // instead of shifting chunks off the front. It ate this buffer once, and the
@@ -510,19 +516,7 @@ async function stop(): Promise<unknown> {
     samples.set(chunk, offset);
     offset += chunk.length;
   }
-
-
-  // Post-hoc, not streaming: ten minutes transcribes in under a minute either
-  // way, so a streaming pipeline would be complexity bought for nothing.
-  let segments: ReturnType<typeof cleanSegments> = [];
-  let transcriptError: string | null = null;
-  try {
-    segments = cleanSegments(await finalEngine().transcribe(samples, 0));
-  } catch (e) {
-    // No speech means no .srt, and a transcription failure must not cost the
-    // session — every other artifact is already complete by this point.
-    transcriptError = String((e as Error)?.message ?? e);
-  }
+  pendingSamples = samples;
 
   return {
     ok: true,
@@ -532,9 +526,34 @@ async function stop(): Promise<unknown> {
     // Held in memory because the stream could not be opened at start. The
     // worker asks for a flush once it knows the folder is usable.
     videoBuffered: lastBuffered.length > 0,
-    segments,
-    transcriptError,
   };
+}
+
+/**
+ * The authoritative pass, run only once the session is already on disk.
+ *
+ * Deliberately not part of stop(). Whisper over a whole session is minutes of
+ * work in WASM — more on the first run, which downloads the model — and while
+ * it ran, nothing had been written: no timeline.json, no session.json, no
+ * report.md. A recording that survives only in the streaming files is one
+ * browser quit away from losing everything derived from it, and the operator
+ * has no way to know that is what they are looking at.
+ *
+ * Post-hoc, not streaming: ten minutes transcribes in under a minute either
+ * way, so a streaming pipeline would be complexity bought for nothing.
+ */
+async function transcribeFinal(): Promise<unknown> {
+  const samples = pendingSamples;
+  pendingSamples = null;
+  if (!samples?.length) return { segments: [], transcriptError: null };
+  try {
+    return { segments: cleanSegments(await finalEngine().transcribe(samples, 0)), transcriptError: null };
+  } catch (e) {
+    // No speech means no .srt, and a transcription failure must not cost the
+    // session — which is now true rather than merely intended, because every
+    // other artifact really is on disk by the time this runs.
+    return { segments: [], transcriptError: String((e as Error)?.message ?? e) };
+  }
 }
 
 /**

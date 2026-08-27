@@ -23,6 +23,7 @@ import {
   OFFSCREEN_FRAMES,
   OFFSCREEN_START,
   OFFSCREEN_STOP,
+  OFFSCREEN_TRANSCRIBE,
   OFFSCREEN_ZIP,
   RECORDING_STATE,
   START_RECORDING,
@@ -328,7 +329,7 @@ async function stop(): Promise<Response> {
   events.sort((a, b) => a.t - b.t);
 
   const capture = (await stopCapture()) as
-    | { segments?: Segment[]; videoBuffered?: boolean; bytes?: number }
+    | { videoBuffered?: boolean; bytes?: number }
     | null;
 
   // The recording could not be streamed to disk — usually a File System Access
@@ -343,18 +344,24 @@ async function stop(): Promise<Response> {
     }
   }
 
-  // Speech joins the same flat array as everything else, then the whole thing
-  // sorts once. The ordering is the information: narration lands *before* the
-  // click it describes, because people narrate intent before acting.
-  const segments = capture?.segments ?? [];
-  if (segments.length) {
-    // Only the authoritative pass ever reaches this array — provisional lines
-    // live solely in speech.ndjson, which stays an append-only log of what was
-    // known at the time. These are merged in purely so report.md can interleave
-    // them; timeline.json filters them back out.
-    // Resolved per segment, not stamped with startUrl: a session that navigates
-    // would otherwise file every word spoken after the first navigation under
-    // the page it opened on.
+  /**
+   * Merging the authoritative narration in, once it exists.
+   *
+   * Speech joins the same flat array as everything else, then the whole thing
+   * sorts once. The ordering is the information: narration lands *before* the
+   * click it describes, because people narrate intent before acting.
+   *
+   * Only the authoritative pass ever reaches this array — provisional lines
+   * live solely in speech.ndjson, which stays an append-only log of what was
+   * known at the time. These are merged in purely so report.md can interleave
+   * them; timeline.json filters them back out.
+   *
+   * Resolved per segment, not stamped with startUrl: a session that navigates
+   * would otherwise file every word spoken after the first navigation under
+   * the page it opened on.
+   */
+  const mergeSpeech = (segments: Segment[]): void => {
+    if (!segments.length) return;
     events.push(
       ...toSpeechEvents(
         segments,
@@ -365,82 +372,126 @@ async function stop(): Promise<Response> {
       ),
     );
     events.sort((a, b) => a.t - b.t);
-  }
+  };
 
-  // Frames are planned only once the timeline is final, because the plan is a
-  // function of the events — including the speech that only just arrived.
-  // Frames are read back out of video.webm, so they need it to be on disk —
-  // which in the zip fallback it never is. No folder means no frame index.
+  let frames = { written: 0, missed: 0 };
   const hasFolder = Boolean(await storedSessionDirectory());
   const stopSettings = await loadSettings();
   const wantsFrames = stopSettings.frames;
   const wantsNarration = stopSettings.narration;
-  let frames = { written: 0, missed: 0 };
-  if (videoOnDisk && hasFolder && wantsFrames) {
-    const plan = planFrames(events);
-    for (const frame of plan) for (const i of frame.events) events[i]!.frame = frame.path;
 
-    // Extraction reports its reason and the caller used to discard it: the
-    // result was cast to {written, missed}, so an `{error}` object survived the
-    // `??`, `written` came back undefined, and the manifest declared
-    // `frames: {enabled: false}`. That reads as "no frames were wanted" when
-    // what happened is "frame extraction failed", which are different facts and
-    // only one of them is true.
-    const got = (await extractFrames(id, plan)) as {
-      written?: number;
-      missed?: number;
-      error?: string;
-    } | null;
-    frames = { written: got?.written ?? 0, missed: got?.missed ?? plan.length };
-    if (got?.error || !frames.written) {
-      console.warn('[bugcast] no frames extracted', { planned: plan.length, ...got });
-    }
+  const buildFrames = async (): Promise<void> => {
+    // Frames are planned only once the timeline is final, because the plan is a
+    // function of the events — including the speech that only just arrived.
+    // Frames are read back out of video.webm, so they need it to be on disk —
+    // which in the zip fallback it never is. No folder means no frame index.
+    if (videoOnDisk && hasFolder && wantsFrames) {
+      const plan = planFrames(events);
+      for (const frame of plan) for (const i of frame.events) events[i]!.frame = frame.path;
 
-    // The paths above were assigned from the plan, before extraction had a
-    // chance to fail. Leaving them behind points timeline.json at JPEGs that
-    // are not on disk — the same broken promise as a session.json naming a
-    // transcript.srt that was never written.
-    // The plan is consumed in order, so entries from `written` on are the ones
-    // no frame was drawn for — including the ordinary `{written: 8, missed: 3}`
-    // case where the video ended before the last planned moments. Clearing only
-    // on a total failure left those three pointing at JPEGs that do not exist,
-    // which is the very thing this is here to prevent.
-    for (const frame of plan.slice(frames.written)) {
-      for (const i of frame.events) delete events[i]!.frame;
+      // Extraction reports its reason and the caller used to discard it: the
+      // result was cast to {written, missed}, so an `{error}` object survived the
+      // `??`, `written` came back undefined, and the manifest declared
+      // `frames: {enabled: false}`. That reads as "no frames were wanted" when
+      // what happened is "frame extraction failed", which are different facts and
+      // only one of them is true.
+      const got = (await extractFrames(id, plan)) as {
+        written?: number;
+        missed?: number;
+        error?: string;
+      } | null;
+      frames = { written: got?.written ?? 0, missed: got?.missed ?? plan.length };
+      if (got?.error || !frames.written) {
+        console.warn('[bugcast] no frames extracted', { planned: plan.length, ...got });
+      }
+
+      // The paths above were assigned from the plan, before extraction had a
+      // chance to fail. Leaving them behind points timeline.json at JPEGs that
+      // are not on disk — the same broken promise as a session.json naming a
+      // transcript.srt that was never written.
+      // The plan is consumed in order, so entries from `written` on are the ones
+      // no frame was drawn for — including the ordinary `{written: 8, missed: 3}`
+      // case where the video ended before the last planned moments. Clearing only
+      // on a total failure left those three pointing at JPEGs that do not exist,
+      // which is the very thing this is here to prevent.
+      for (const frame of plan.slice(frames.written)) {
+        for (const i of frame.events) delete events[i]!.frame;
+      }
     }
-  }
+  };
 
   const redaction = redactor.summary();
   let written: string | null = null;
   let writeError: string | null = null;
   let report = '';
-  try {
-    report = renderSessionReport(id, title, startedAt, startUrl, events, redaction);
-    const files = sessionFiles(id, startedAt, startUrl, events, redaction, report, videoOnDisk, segments, frames.written, { narration: wantsNarration, frames: wantsFrames }, app, dedupe(scripts));
-    if (hasFolder) {
-      try {
-        written = await writeSession(id, files);
-      } catch (e) {
-        // The folder write can fail for reasons the user cannot act on mid-flow
-        // — most often a lapsed File System Access grant, which does not
-        // outlive the context that obtained it. Losing a recorded session to
-        // that is the worst outcome available, so fall through to the zip
-        // rather than throwing away work that already exists.
-        console.warn('[bugcast] folder write failed, falling back to a zip', e);
-        writeError = `Saved as a zip instead — the folder write failed: ${(e as Error)?.message}`;
+  let segments: Segment[] = [];
+
+  /**
+   * Everything the session is, written out.
+   *
+   * Called twice on purpose. The first call runs before transcription so the
+   * recording is durable — a session that exists only as events.ndjson and
+   * video.webm is one browser quit away from losing its timeline, its report
+   * and its manifest, and nothing on disk says that is what you are looking at.
+   * The second call runs after, with the narration and the frame index folded
+   * in, and overwrites the same files.
+   *
+   * Writing twice costs a few hundred kilobytes of text. Waiting cost eleven
+   * minutes on a ninety-three second recording, with the operator watching an
+   * empty folder and no way to tell a slow pass from a wedged one.
+   */
+  const persist = async (): Promise<void> => {
+    try {
+      report = renderSessionReport(id, title, startedAt, startUrl, events, redaction);
+      const files = sessionFiles(id, startedAt, startUrl, events, redaction, report, videoOnDisk, segments, frames.written, { narration: wantsNarration, frames: wantsFrames }, app, dedupe(scripts));
+      if (hasFolder) {
+        try {
+          written = await writeSession(id, files);
+          writeError = null;
+        } catch (e) {
+          // The folder write can fail for reasons the user cannot act on mid-flow
+          // — most often a lapsed File System Access grant, which does not
+          // outlive the context that obtained it. Losing a recorded session to
+          // that is the worst outcome available, so fall through to the zip
+          // rather than throwing away work that already exists.
+          console.warn('[bugcast] folder write failed, falling back to a zip', e);
+          writeError = `Saved as a zip instead — the folder write failed: ${(e as Error)?.message}`;
+          written = await zipSession(id, files);
+        }
+      } else {
         written = await zipSession(id, files);
       }
-    } else {
-      written = await zipSession(id, files);
+    } catch (e) {
+      // A failed write must not swallow the session — the caller still gets the
+      // events, so a folder problem costs a save rather than the recording.
+      // Surfaced, not just logged: a session that recorded fine and then failed
+      // to save is exactly the case where the user needs to know why, right now,
+      // while the state that caused it still exists.
+      writeError = String((e as Error)?.message ?? e);
+      console.error('[bugcast] could not write session', e);
     }
+  };
+
+  // Durable first. Nothing slow has run yet.
+  await persist();
+
+  try {
+    const pass = (await transcribeCapture()) as
+      | { segments?: Segment[]; transcriptError?: string | null }
+      | null;
+    segments = pass?.segments ?? [];
+    if (pass?.transcriptError) {
+      console.warn('[bugcast] transcription failed', pass.transcriptError);
+      await chrome.storage.local.set({ liveError: `Transcription failed: ${pass.transcriptError}` });
+    }
+    mergeSpeech(segments);
+    await buildFrames();
+    // Only worth rewriting if the second pass actually added something.
+    if (segments.length || frames.written) await persist();
   } catch (e) {
-    // A failed write must not swallow the session — the caller still gets the
-    // events, so a folder problem costs a save rather than the recording.
-    // Surfaced, not just logged: a session that recorded fine and then failed
-    // to save is exactly the case where the user needs to know why, right now,
-    // while the state that caused it still exists.
-    writeError = String((e as Error)?.message ?? e);
-    console.error('[bugcast] could not write session', e);
+    // The session is already on disk. An enrichment failure leaves it exactly
+    // as complete as it was a moment ago, which is the whole point of the split.
+    console.error('[bugcast] post-stop enrichment failed', e);
   } finally {
     // Closed only once everything is out. The zip path reads the buffered
     // recording from this document's memory, so closing it earlier would
@@ -1019,10 +1070,28 @@ async function stopCapture(): Promise<unknown> {
   // <video>, a canvas and requestVideoFrameCallback, none of which exist in a
   // service worker. closeOffscreen() runs once everything is out.
   //
-  // Wrapped, because this is where transcription happens: on a long session it
-  // is minutes of work behind a single message.
+  // Still wrapped: closing the recorder, draining queued chunks and closing the
+  // writable is short but not instant, and an MV3 worker that suspends waiting
+  // for the reply loses the video. Transcription no longer happens here — see
+  // transcribeCapture, which runs once the session is already on disk.
   return whileAlive(() =>
     chrome.runtime.sendMessage({ target: 'offscreen', type: OFFSCREEN_STOP }).catch(() => null),
+  );
+}
+
+/**
+ * The authoritative transcription, asked for after the session is on disk.
+ *
+ * Still wrapped in whileAlive: this is minutes of work behind a single message
+ * on a long session, and an MV3 worker that suspends mid-wait never sees the
+ * reply. What changed is what is at stake if it does — a lost transcript now
+ * rather than a lost session.
+ */
+async function transcribeCapture(): Promise<unknown> {
+  return whileAlive(() =>
+    chrome.runtime
+      .sendMessage({ target: 'offscreen', type: OFFSCREEN_TRANSCRIBE })
+      .catch((e) => ({ segments: [], transcriptError: String(e?.message ?? e) })),
   );
 }
 

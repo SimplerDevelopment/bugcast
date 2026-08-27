@@ -8,6 +8,15 @@ export const DROP_MARKER = 'bugcast/drop-marker';
 export const OFFSCREEN_FRAMES = 'bugcast/offscreen-frames';
 export const OFFSCREEN_START = 'bugcast/offscreen-start';
 export const OFFSCREEN_STOP = 'bugcast/offscreen-stop';
+/**
+ * The authoritative transcription pass, asked for separately from the stop.
+ *
+ * One message did both, and it meant the session's artifacts waited on Whisper:
+ * a 93-second recording took eleven minutes to reach disk, with only the
+ * streamed files there until it did. Separating them lets the session be
+ * durable first and enriched second.
+ */
+export const OFFSCREEN_TRANSCRIBE = 'bugcast/offscreen-transcribe';
 export const OFFSCREEN_STARTED = 'bugcast/offscreen-started';
 export const OFFSCREEN_ERROR = 'bugcast/offscreen-error';
 export const INTERACTION = 'bugcast/interaction';
