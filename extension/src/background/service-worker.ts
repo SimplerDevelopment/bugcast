@@ -372,8 +372,11 @@ async function stop(): Promise<Response> {
   // Frames are read back out of video.webm, so they need it to be on disk —
   // which in the zip fallback it never is. No folder means no frame index.
   const hasFolder = Boolean(await storedSessionDirectory());
+  const stopSettings = await loadSettings();
+  const wantsFrames = stopSettings.frames;
+  const wantsNarration = stopSettings.narration;
   let frames = { written: 0, missed: 0 };
-  if (videoOnDisk && hasFolder) {
+  if (videoOnDisk && hasFolder && wantsFrames) {
     const plan = planFrames(events);
     for (const frame of plan) for (const i of frame.events) events[i]!.frame = frame.path;
 
@@ -413,7 +416,7 @@ async function stop(): Promise<Response> {
   let report = '';
   try {
     report = renderSessionReport(id, title, startedAt, startUrl, events, redaction);
-    const files = sessionFiles(id, startedAt, startUrl, events, redaction, report, videoOnDisk, segments, frames.written, app, dedupe(scripts));
+    const files = sessionFiles(id, startedAt, startUrl, events, redaction, report, videoOnDisk, segments, frames.written, { narration: wantsNarration, frames: wantsFrames }, app, dedupe(scripts));
     if (hasFolder) {
       try {
         written = await writeSession(id, files);
@@ -509,6 +512,17 @@ function sessionFiles(
   video: boolean,
   segments: Segment[],
   frameCount: number,
+  /**
+   * What the operator asked for, so `enabled: false` can say WHY.
+   *
+   * The repo has already paid for this once: `enabled: false` meant "the array
+   * came out empty" and was read as "the feature was switched off", which sent
+   * a whole investigation to the wrong module (BC-001). Now that the popup can
+   * genuinely switch these off, the two really are different facts and the
+   * artifact has to distinguish them — otherwise the same misreading is not
+   * just possible but correct half the time.
+   */
+  wanted: { narration: boolean; frames: boolean },
   /** What the page contributed via `bugcast:session`. Absent when it said nothing. */
   app: Record<string, unknown> | null,
   /** One entry per script URL, for resolving a minified frame at read time. */
@@ -547,10 +561,10 @@ function sessionFiles(
             : { enabled: false },
           transcript: segments.length
             ? { enabled: true, file: 'transcript.srt', segments: segments.length }
-            : { enabled: false },
+            : { enabled: false, ...(wanted.narration ? {} : { reason: 'turned off' }) },
           frames: frameCount
             ? { enabled: true, dir: 'frames/', count: frameCount, longEdge: 1280 }
-            : { enabled: false },
+            : { enabled: false, ...(wanted.frames ? {} : { reason: 'turned off' }) },
           // Declared false rather than omitted: an agent must be able to tell
           // "this page shipped no source maps" from "this build did not index them".
           scripts: scripts.length
@@ -985,7 +999,7 @@ async function startCapture(
     sessionId: session,
     // Optional, default on. No speech simply means no .srt; it must never cost
     // the recording.
-    withMic: true,
+    withMic: settings.narration,
     tier: settings.modelTier,
     openaiApiKey: settings.openaiApiKey,
     micDeviceId: settings.micDeviceId,
