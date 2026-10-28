@@ -22,6 +22,24 @@ export interface Settings {
   liveTranscription: boolean;
   video: boolean;
   /**
+   * Record the microphone, which is the only source of narration.
+   *
+   * On by default, and worth a control of its own rather than living in the
+   * options page: a microphone is the one thing here that records the room
+   * rather than the browser, and someone who wants a session without it should
+   * not have to go looking. Off means no speech.ndjson and no transcript.srt —
+   * the session is otherwise unaffected.
+   */
+  narration: boolean;
+  /**
+   * Extract the frame index at stop.
+   *
+   * Needs video and a chosen folder; without either there is nothing to index
+   * and the setting is moot. Costs a pass over the finished recording, which
+   * on a long session is the slowest thing stop() does.
+   */
+  frames: boolean;
+  /**
    * Capture what was typed.
    *
    * Off by default and deliberately so: a detector that misses one field writes
@@ -48,6 +66,8 @@ export interface Settings {
 export const DEFAULTS: Settings = {
   modelTier: DEFAULT_TIER,
   micDeviceId: '',
+  narration: true,
+  frames: true,
   liveTranscription: true,
   video: true,
   typedValues: false,

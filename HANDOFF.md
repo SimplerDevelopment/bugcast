@@ -1,7 +1,75 @@
 # Handoff — bugcast transcription, audio, and artifact integrity
 
-**`main` is at `bd15337`. Zero open PRs. Four merged on 2026-08-25 (#27, #28, #29, #30).**
-**Written 2026-08-25, after the first session that verified any of it.**
+**Everything below "Goal" was written 2026-08-25, when `main` was at `bd15337`.**
+**As of 2026-08-27 `main` is at `6a4786d` (#33 merged) and `feat/record-sources`
+is five commits ahead of it — `822a28e`, `847376e`, `d9efee9`, `640522d`,
+`48395da`. That branch work is not described below and has not been re-verified
+against a recording; treat the columns below as of the 25th.**
+
+## OPEN THREAD — npm name reservation (2026-08-27, unfinished)
+
+This is the only thing in this document that is live and blocked. It touches no
+code in this repo.
+
+### Goal
+
+Claim `bugcast` on npm before anyone else does, owned by the **simplerdevelopment**
+org. `mcp/package.json` is already `"name": "bugcast"` at `0.1.0`, so the name
+is load-bearing for a future real release.
+
+### What is established
+
+- **The name is free.** As of 2026-08-27, `bugcast`, `bugcast-mcp`,
+  `bugcast-extension` and `@bugcast/mcp` all 404 on the registry.
+- **The org exists and is ours.** `npm org ls simplerdevelopment` →
+  `daniel-coyle - owner`. No org to create.
+- `npm whoami` → `daniel-coyle`. The CLI is authenticated on this machine.
+- **Decision taken:** publish *both* — unscoped `bugcast` (locks the good name,
+  keeps a future `npx bugcast` working) and `@simplerdevelopment/bugcast`.
+  Reserve-only: a README, no code. The real `mcp/` server ships later as `0.1.0`,
+  which supersedes the `0.0.0` placeholder cleanly.
+
+### What didn't work — don't repeat
+
+- **`npm publish` from an agent shell fails.** `403 Forbidden … Two-factor
+  authentication or granular access token with bypass 2fa enabled is required`.
+  An interactive OTP prompt cannot be answered from a backgrounded shell either,
+  so this needs the human with `--otp=XXXXXX`, or a granular token with 2FA
+  bypass. Do not burn turns retrying the bare `npm publish`.
+- The staging directories from that session were under the **session scratchpad**,
+  which does not survive. Recreate rather than hunt for them — the whole package
+  is the two files below.
+
+### The stub, in full
+
+`package.json` (change `name` to `@simplerdevelopment/bugcast` for the scoped
+twin; everything else identical):
+
+```json
+{
+  "name": "bugcast",
+  "version": "0.0.0",
+  "description": "Name reservation. bugcast records a browser QA session — video, events, speech — and serves it to an agent over MCP. Not yet published.",
+  "license": "MIT",
+  "repository": "github:SimplerDevelopment/bugcast",
+  "keywords": ["bugcast", "mcp", "qa", "screen-recording"],
+  "files": ["README.md"]
+}
+```
+
+`README.md` — three lines saying it is a name reservation, what bugcast is, and
+the repo URL. Both packs verified clean: 2 files, 446 B.
+
+### Next steps
+
+1. **Publish both, with an OTP** (same 6-digit code works for both inside its
+   window): `npm publish --access public --otp=XXXXXX` from each directory.
+   `--access public` is required for the scoped one and harmless for the other.
+2. **Transfer the unscoped package to the org** — npmjs.com → `bugcast` →
+   Settings → transfer to **simplerdevelopment**. The CLI cannot do this for an
+   unscoped package published by a user. The scoped one is org-owned already.
+3. Confirm with `npm view bugcast maintainers`.
+
 
 ## Goal
 

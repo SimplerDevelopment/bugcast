@@ -1,0 +1,175 @@
+<!doctype html>
+<title>bugcast a/v sync</title>
+<!--
+  A page that says what time it is in a form a video frame can be read back for.
+
+  Sixteen high-contrast blocks across the top carry a binary counter of 50ms
+  ticks — 16 bits is 54 minutes of range, and 50ms is finer than a frame at the
+  15fps this records at, so the quantisation error is smaller than the thing
+  being measured.
+
+  Everything is positioned in PERCENTAGES on purpose. The decoder samples the
+  same fractions of a decoded frame and never has to know the viewport size,
+  the device pixel ratio, or how tabCapture chose to scale.
+
+  Black background, white blocks, sampled at block centre and thresholded:
+  VP8 is lossy and will smear an edge, but it will not turn the middle of a
+  50-pixel white square dark.
+
+  It also solves a problem the smoke test documents but cannot fix: tabCapture
+  is paint-driven, and a static page produces a zero-byte video. This one
+  repaints every animation frame, so there is always a video to check.
+-->
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #fff;
+               font: 16px/1.4 ui-monospace, monospace; }
+  /* The locator. Magenta because nothing else on a captured desktop is, and
+     the decoder finds the page inside the frame by looking for it rather than
+     assuming the video and the viewport are the same rectangle. They are not:
+     an emulated viewport lays out at one size and records at another. */
+  #locator { position: absolute; top: 0; left: 0; width: 100%; height: 3vw; background: #f0f; }
+  /* Sized in vw, not vh, so the decoder needs only the page's WIDTH to know
+     where these are — one measurement instead of two. */
+  .bit { position: absolute; top: 4vw; width: 3vw; height: 3vw; background: #000; }
+  #readout { position: absolute; top: 14%; left: 2%; font-size: 2vw; }
+  #beacons { position: absolute; bottom: 4%; left: 2%; opacity: .7; }
+  button { font: inherit; padding: .6em 1em; margin: 0 .5em 0 0; }
+  #controls { position: absolute; top: 30%; left: 2%; }
+</style>
+
+<div id="locator"></div>
+<div id="bits"></div>
+<div id="readout">tick —</div>
+<div id="controls">
+  <button id="act-a" data-testid="act-a">Action A</button>
+  <button id="act-b" data-testid="act-b">Action B</button>
+</div>
+<div id="beacons">beacons: <span id="count">0</span></div>
+
+<script>
+  const BITS = 16;
+  const TICK_MS = 50;
+  // How often a beacon lands in the timeline. Every one is a sync sample, so
+  // this also sets how finely drift can be measured across the session.
+  const BEACON_MS = 2000;
+
+  const start = performance.now();
+  const tickNow = () => Math.floor((performance.now() - start) / TICK_MS);
+
+  const bits = document.getElementById('bits');
+  const els = [];
+  for (let i = 0; i < BITS; i++) {
+    const d = document.createElement('div');
+    d.className = 'bit';
+    // Matches BIT_X in av-sync.mjs, as a fraction of the PAGE's width — which
+    // the decoder measures from the locator rather than assuming.
+    d.style.left = (2 + i * 5.5) + '%';
+    bits.appendChild(d);
+    els.push(d);
+  }
+
+  const readout = document.getElementById('readout');
+  let painted = -1;
+  // Counted so a beacon can say whether the page is painting at all. A frozen
+  // counter and a starved encoder look identical from outside the browser, and
+  // guessing between them has already cost three wrong diagnoses.
+  let rafs = 0;
+  function paint() {
+    const t = tickNow();
+    if (t !== painted) {
+      painted = t;
+      for (let i = 0; i < BITS; i++) els[i].style.background = (t >> i) & 1 ? '#fff' : '#000';
+      readout.textContent = 'tick ' + t;
+      // Change the WHOLE frame, every tick. tabCapture is damage-driven: a page
+      // whose only movement is a row of small blocks gives the compositor
+      // almost nothing to notice, and the capture thins out to a few frames a
+      // minute. Measured: small-block-only damage produced 14 frames in 30s.
+      // Both shades stay well below the decode threshold, so the bits above
+      // still read as pure black and white.
+      document.body.style.background = t % 2 ? '#101010' : '#1a1a1a';
+    }
+    rafs++;
+    requestAnimationFrame(paint);
+  }
+  requestAnimationFrame(paint);
+
+  // The beacon carries the page's OWN clock into the recording. That is what
+  // makes this checkable without trusting any shared clock: the timeline says
+  // when it thinks the beacon happened, the video says what the page was
+  // showing at that moment, and the beacon text says what the page thought the
+  // time was. Two of those three must agree.
+  let n = 0;
+  const count = document.getElementById('count');
+  setInterval(() => {
+    const t = tickNow();
+    n++;
+    count.textContent = String(n);
+    console.error(
+      'AVSYNC beacon seq=' + n + ' tick=' + t +
+      ' rafs=' + rafs + ' vis=' + document.visibilityState + ' focus=' + document.hasFocus(),
+    );
+  }, BEACON_MS);
+
+  // A real interaction path to check alongside the console path — a click is
+  // captured by a different mechanism (content script) than a console error
+  // (CDP Runtime), and they can drift apart independently.
+  for (const id of ['act-a', 'act-b']) {
+    document.getElementById(id).addEventListener('click', () => {
+      console.error('AVSYNC click id=' + id + ' tick=' + tickNow());
+    });
+  }
+
+  /**
+   * Bursts of sound, emitted by the page at moments the page can name.
+   *
+   * The obvious source was Chrome's fake microphone. It cannot be used: the
+   * --use-file-for-fake-audio-capture flag forces a fake audio device, and
+   * tabCapture resolves its own audio through the same path, so recording
+   * refuses to start at all with "Requested device not found". Measured, twice.
+   *
+   * Emitting from the page is better anyway. The burst is scheduled against
+   * the same clock that paints the counter, so the sound and the picture share
+   * a reference rather than being compared through an assumed one — and no
+   * flags are involved that could break the thing under test.
+   *
+   * Voiced harmonics rather than a pure tone, so the signal survives whatever
+   * processing sits between here and the file.
+   */
+  let audio = null;
+  const startAudio = () => {
+    if (audio) return;
+    audio = new (window.AudioContext || window.webkitAudioContext)();
+  };
+  // Autoplay policy: a context created without a gesture starts suspended, so
+  // take the first click as permission and ask for it up front as well.
+  document.addEventListener('pointerdown', () => { startAudio(); audio?.resume(); }, { once: true });
+  startAudio();
+
+  let bursts = 0;
+  setInterval(() => {
+    if (!audio || audio.state !== 'running') return;
+    const t = tickNow();
+    const at = audio.currentTime;
+    const gain = audio.createGain();
+    gain.connect(audio.destination);
+    // 10ms raised-cosine edges: a hard start is a click, and a click is
+    // broadband — the first thing any suppressor throws away.
+    gain.gain.setValueAtTime(0.0001, at);
+    gain.gain.exponentialRampToValueAtTime(0.2, at + 0.01);
+    gain.gain.setValueAtTime(0.2, at + 0.29);
+    gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.3);
+    for (const [hz, level] of [[130, 1], [260, 0.6], [390, 0.4], [520, 0.25]]) {
+      const osc = audio.createOscillator();
+      osc.frequency.value = hz;
+      const g = audio.createGain();
+      g.gain.value = level / 2.25;
+      osc.connect(g).connect(gain);
+      osc.start(at);
+      osc.stop(at + 0.31);
+    }
+    bursts++;
+    console.error('AVSYNC audio seq=' + bursts + ' tick=' + t);
+  }, 2000);
+
+  window.__tc = { TICK_MS, BITS, tickNow, startedAt: start };
+</script>

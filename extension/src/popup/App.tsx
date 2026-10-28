@@ -41,6 +41,8 @@ export function App() {
   const [folder, setFolder] = useState<string | null>(null);
   const [tier, setTier] = useState<ModelTier>(DEFAULT_TIER);
   const [video, setVideo] = useState(true);
+  const [narration, setNarration] = useState(true);
+  const [frames, setFrames] = useState(true);
   const [hosted, setHosted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -77,6 +79,8 @@ export function App() {
       const stored = await chrome.storage.local.get([
         'modelTier',
         'video',
+        'narration',
+        'frames',
         'lastSession',
         'recording',
         'openaiApiKey',
@@ -85,6 +89,8 @@ export function App() {
       setRecording(Boolean(stored?.recording));
       setTier((stored?.modelTier as ModelTier) ?? DEFAULT_TIER);
       setVideo(stored?.video !== false);
+      setNarration(stored?.narration !== false);
+      setFrames(stored?.frames !== false);
       // The key itself never enters popup state — only whether one exists.
       setHosted(Boolean(stored?.openaiApiKey));
       setLast(stored?.lastSession ?? null);
@@ -162,10 +168,17 @@ export function App() {
     await chrome.storage.local.set({ modelTier: next });
   }, []);
 
-  const toggleVideo = useCallback(async (next: boolean) => {
-    setVideo(next);
-    await chrome.storage.local.set({ video: next });
-  }, []);
+  /**
+   * One setter for all of them: they differ only in which key they write, and
+   * three near-identical callbacks is how the fourth one ends up subtly wrong.
+   */
+  const toggleSource = useCallback(
+    async (key: 'video' | 'narration' | 'frames', next: boolean, set: (v: boolean) => void) => {
+      set(next);
+      await chrome.storage.local.set({ [key]: next });
+    },
+    [],
+  );
 
   const mark = useCallback(async () => {
     await chrome.runtime.sendMessage({ type: DROP_MARKER, note: 'This is the bug' });
@@ -328,10 +341,43 @@ export function App() {
           </span>
         </button>
       ) : (
-        <label className="flex items-center gap-2 text-xs text-neutral-600">
-          <input type="checkbox" checked={video} onChange={(e) => void toggleVideo(e.target.checked)} />
-          Record video
-        </label>
+        <div className="flex flex-col gap-1 text-xs text-neutral-600">
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={video}
+              onChange={(e) => void toggleSource('video', e.target.checked, setVideo)}
+            />
+            Record video
+          </label>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={narration}
+              onChange={(e) => void toggleSource('narration', e.target.checked, setNarration)}
+            />
+            Record narration
+            <span className="text-neutral-400">the microphone</span>
+          </label>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={frames}
+              disabled={!video}
+              onChange={(e) => void toggleSource('frames', e.target.checked, setFrames)}
+            />
+            Extract frames
+            {/* Frames are cut from the finished recording, so this is not an
+                independent choice — saying so beats a checkbox that silently
+                does nothing. */}
+            <span className="text-neutral-400">{video ? 'at stop' : 'needs video'}</span>
+          </label>
+          {/* Deliberately no checkbox for events. Network, console, exceptions
+              and interactions ARE the session — a recording without them is a
+              screen capture, and every consumer of session.json assumes the
+              timeline exists. */}
+          <span className="text-neutral-400">Events are always recorded.</span>
+        </div>
       )}
 
       <div className="flex items-center justify-between gap-2 text-xs text-neutral-500">
